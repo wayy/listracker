@@ -212,7 +212,7 @@ def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
     prefix = "pc" if mode == "cat" else "pw" if mode == "wep" else "pt"
     
     # Сокращаем value, если оно слишком длинное для callback_data (64 байта лимит)
-    short_val = value[:20] if value else ""
+    short_val = truncate_callback_value(value)
     
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}_{page-1}_{short_val}"))
