@@ -53,8 +53,11 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
-# Новая структура URL для более надежного получения данных
+# Основной эндпоинт инвентаря
 INVENTORY_URL = "https://steamcommunity.com/inventory/{steam_id}/{app_id}/2?l=russian&count=5000"
+# Альтернативный (рыночный) эндпоинт
+MARKET_INVENTORY_URL = "https://steamcommunity.com/market/inventory/{steam_id}/{app_id}/2?l=russian"
+
 PRICE_URL = "https://steamcommunity.com/market/priceoverview/?appid={app_id}&currency={currency}&market_hash_name={name}"
 RESOLVE_ID_URL = "https://steamcommunity.com/id/{vanity_url}/?xml=1"
 
@@ -71,17 +74,14 @@ async def init_db():
         await db.commit()
 
 async def resolve_steam_id(text):
-    # Если сразу введен цифровой ID
     digit_match = re.search(r'\b(7656119\d{10})\b', text)
     if digit_match:
         return digit_match.group(1)
 
-    # Если введена ссылка вида /profiles/ID
     profiles_match = re.search(r'steamcommunity\.com/profiles/(\d+)', text)
     if profiles_match:
         return profiles_match.group(1)
 
-    # Если введена ссылка вида /id/vanity
     vanity_match = re.search(r'steamcommunity\.com/id/([^/?\s]+)', text)
     if vanity_match:
         vanity_url = vanity_match.group(1)
@@ -98,32 +98,37 @@ async def resolve_steam_id(text):
     return None
 
 async def fetch_inventory(steam_id, app_id):
-    url = INVENTORY_URL.format(steam_id=steam_id, app_id=app_id)
-    # Создаем новую сессию для каждого запроса, чтобы не накапливать куки
+    # Пробуем сначала основной метод
+    result = await _request_inventory(INVENTORY_URL.format(steam_id=steam_id, app_id=app_id))
+    
+    # Если ошибка 400 или пустые данные, пробуем рыночный эндпоинт
+    if result is None or (isinstance(result, list) and len(result) == 0):
+        logger.info(f"Основной метод не сработал для {steam_id}, пробуем рыночный эндпоинт...")
+        result = await _request_inventory(MARKET_INVENTORY_URL.format(steam_id=steam_id, app_id=app_id))
+        
+    return result
+
+async def _request_inventory(url):
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         try:
             async with session.get(url, timeout=25) as resp:
                 if resp.status == 403:
-                    logger.warning(f"403 Forbidden для ID {steam_id}. Проверьте приватность.")
                     return "PRIVATE"
                 if resp.status == 429:
-                    logger.warning(f"429 Too Many Requests. Steam временно ограничил этот IP.")
                     return "RATE_LIMIT"
                 if resp.status != 200:
-                    logger.error(f"Steam ответил статусом {resp.status}")
+                    logger.error(f"Steam ответил статусом {resp.status} на URL: {url}")
                     return None
                 
                 try:
                     data = await resp.json()
                 except Exception:
-                    # Если Steam прислал не JSON
                     return None
 
                 if not data or 'descriptions' not in data:
-                    # Проверяем поле total_inventory_count, если оно 0, значит инвентарь пуст
                     if data and data.get('total_inventory_count') == 0:
                         return []
-                    return None # Ошибка структуры данных
+                    return None
                 
                 items = []
                 descriptions = data.get('descriptions', [])
@@ -197,7 +202,7 @@ async def price_checker_loop(bot: Bot):
 
                         await db.execute("INSERT INTO prices (item_id, lowest_price, timestamp) VALUES (?, ?, ?)", (item_id, current_price, datetime.now()))
                         await db.commit()
-                        await asyncio.sleep(5) # Задержка для ТП
+                        await asyncio.sleep(5) 
         except Exception as e:
             logger.error(f"Ошибка в фоновом цикле: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
@@ -240,13 +245,13 @@ async def process_link(message: Message, state: FSMContext):
     result = await fetch_inventory(steam_id, APP_ID)
     
     if result == "PRIVATE":
-        return await msg.edit_text("❌ Ошибка доступа. Убедитесь, что инвентарь открыт в настройках Steam.")
+        return await msg.edit_text("❌ Ошибка доступа (403). Проверьте приватность инвентаря в Steam.")
     elif result == "RATE_LIMIT":
-        return await msg.edit_text("⚠️ Steam заблокировал запросы. Попробуйте снова через 10-15 минут.")
+        return await msg.edit_text("⚠️ Ошибка 429. Steam временно ограничил запросы. Попробуйте через 15 минут.")
     elif result is None:
-        return await msg.edit_text("❌ Steam вернул пустой ответ. Попробуйте еще раз или проверьте ID.")
+        return await msg.edit_text("❌ Ошибка Steam (в т.ч. ошибка 400). Попробуйте еще раз позже.")
     elif len(result) == 0:
-        return await msg.edit_text("⚠️ В инвентаре не найдено предметов CS2, доступных для продажи.")
+        return await msg.edit_text("⚠️ В инвентаре не найдено ликвидных предметов CS2.")
 
     async with aiosqlite.connect("inventory.db") as db:
         await db.execute("INSERT OR REPLACE INTO users (chat_id, steam_id) VALUES (?, ?)", (message.chat.id, steam_id))
@@ -254,7 +259,7 @@ async def process_link(message: Message, state: FSMContext):
         await db.commit()
     
     await state.clear()
-    await msg.edit_text(f"✅ Успех! Найдено предметов: {len(result)}.\nИспользуйте /items, чтобы увидеть список.")
+    await msg.edit_text(f"✅ Успех! Найдено предметов: {len(result)}.\nИспользуйте /items для списка.")
 
 async def main():
     await init_db()
