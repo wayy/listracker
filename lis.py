@@ -8,6 +8,48 @@ import urllib.parse
 from collections import Counter
 from datetime import datetime
 
+
+
+from aiohttp import web
+
+# Этот эндпоинт будет отдавать данные вашему сайту на GitHub
+async def get_app_inventory(request):
+    chat_id = request.query.get("chat_id")
+    if not chat_id:
+        return web.json_response({"error": "no_id"}, status=400)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        query = """
+            SELECT i.name, ui.amount, i.category 
+            FROM items i JOIN user_items ui ON i.id = ui.item_id 
+            WHERE ui.chat_id = ?
+        """
+        res = await db.execute(query, (chat_id,))
+        items = [{"name": r[0], "amount": r[1], "category": r[2]} for r in await res.fetchall()]
+        
+        # Важно для работы между разными доменами (GitHub -> Bothost)
+        return web.json_response(items, headers={"Access-Control-Allow-Origin": "*"})
+
+# Запуск сервера внутри основной функции main
+async def main():
+    global bot_instance
+    await init_db()
+    bot = Bot(token=TOKEN)
+    bot_instance = bot
+    
+    # Запускаем веб-сервер на порту 8080 (стандарт для Bothost)
+    app = web.Application()
+    app.router.add_get('/api/inventory', get_app_inventory)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', 8080).start()
+    
+    asyncio.create_task(monitor_prices_task())
+    await dp.start_polling(bot)
+
+
+
+
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
