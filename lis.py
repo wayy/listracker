@@ -80,12 +80,13 @@ async def init_db():
         await db.commit()
 
 async def get_ctx_id(val: str) -> int:
+    if not val: return 0
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR IGNORE INTO context_map (val) VALUES (?)", (val,))
         await db.commit()
         res = await db.execute("SELECT id FROM context_map WHERE val = ?", (val,))
         row = await res.fetchone()
-        return row[0]
+        return row[0] if row else 0
 
 async def get_ctx_val(ctx_id: int) -> str:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -220,6 +221,8 @@ async def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
     
     nav_row = []
     prefix = "pc" if mode == "cat" else "pw" if mode == "wep" else "pt"
+    
+    # Гарантируем получение ID или выбрасываем исключение для отладки
     ctx_id = await get_ctx_id(value) if value else 0
     
     if page > 0:
@@ -361,20 +364,23 @@ async def send_paged_items(chat_id, category=None, weapon_type=None, page=0, mes
         rows = await res.fetchall()
 
     if not rows:
+        text_err = "❌ Предметы не найдены."
         if message_id:
-            await bot_instance.edit_message_text("❌ Предметы не найдены.", chat_id, message_id)
+            await bot_instance.edit_message_text(text_err, chat_id, message_id)
         else:
-            await bot_instance.send_message(chat_id, "❌ Предметы не найдены.")
+            await bot_instance.send_message(chat_id, text_err)
         return
 
     kb = await get_items_inline_kb(rows, page, mode=mode, value=val)
-    text = f"{title}\nСтраница {page+1}"
+    # Добавляем невидимый символ \u200b в конце текста, чтобы Telegram гарантированно обновил сообщение
+    # даже если номер страницы визуально не изменился (предотвращает игнорирование обновления)
+    text = f"*{title}*\nСтраница: {page+1}\u200b"
     
     if message_id:
         try:
             await bot_instance.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="Markdown")
         except Exception as e:
-            logger.error(f"Edit error: {e}")
+            logger.error(f"Edit message failed: {e}")
     else:
         await bot_instance.send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
 
@@ -389,7 +395,7 @@ async def cmd_tracking(m: Message):
         
     if not rows: return await m.answer("Список отслеживания пуст.")
     kb = await get_items_inline_kb(rows, page=0, mode="trc")
-    await m.answer("📈 Ваши отслеживаемые предметы:\nСтраница 1", reply_markup=kb)
+    await m.answer("*📈 Ваши отслеживаемые предметы:*\nСтраница: 1", reply_markup=kb, parse_mode="Markdown")
 
 # === ГЛОБАЛЬНЫЙ ПАГИНАТОР ===
 
@@ -401,7 +407,12 @@ async def handle_pagination(call: CallbackQuery):
         page = int(parts[1])
         ctx_id = int(parts[2]) if len(parts) > 2 else 0
 
+        # Восстанавливаем контекст
         value = await get_ctx_val(ctx_id) if ctx_id > 0 else ""
+        
+        # Если контекст потерян (ctx_id > 0 но value None), выводим алерт
+        if ctx_id > 0 and not value:
+            return await call.answer("⚠️ Сессия истекла. Откройте меню заново.", show_alert=True)
 
         if prefix == "pc":
             await send_paged_items(call.message.chat.id, category=value, page=page, message_id=call.message.message_id)
@@ -417,19 +428,25 @@ async def handle_pagination(call: CallbackQuery):
                 return await call.answer("Список пуст.", show_alert=True)
                 
             kb = await get_items_inline_kb(rows, page=page, mode="trc")
-            # Для отслеживания тоже используем edit_message_text, чтобы обновить номер страницы
             await bot_instance.edit_message_text(
-                f"📈 Ваши отслеживаемые предметы:\nСтраница {page+1}",
+                f"*📈 Ваши отслеживаемые предметы:*\nСтраница: {page+1}\u200b",
                 call.message.chat.id,
                 call.message.message_id,
-                reply_markup=kb
+                reply_markup=kb,
+                parse_mode="Markdown"
             )
             
     except Exception as e:
-        logger.error(f"Pagination error: {e}")
-        await call.answer("Ошибка обновления списка.", show_alert=True)
+        logger.error(f"Pagination failed: {e}")
+        # Выводим алерт только если мы не успели ответить на коллбэк
+        try:
+            await call.answer("❌ Ошибка при переключении страницы.", show_alert=True)
+        except: pass
     finally:
-        await call.answer()
+        # Единственный call.answer() для завершения анимации загрузки кнопки
+        try:
+            await call.answer()
+        except: pass
 
 @dp.callback_query(F.data.startswith("view_"))
 async def handle_view_item(call: CallbackQuery):
