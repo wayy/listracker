@@ -64,7 +64,7 @@ def get_item_category(name: str) -> str:
 # Инициализация базы данных
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA journal_mode=WAL") # Для стабильности при нагрузках
+        await db.execute("PRAGMA journal_mode=WAL") 
         await db.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY, steam_id TEXT)")
         await db.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, category TEXT)")
         await db.execute("CREATE TABLE IF NOT EXISTS user_items (chat_id INTEGER, item_id INTEGER, amount INTEGER, PRIMARY KEY (chat_id, item_id))")
@@ -77,7 +77,24 @@ async def init_db():
                 UNIQUE(chat_id, item_name)
             )
         """)
+        # Таблица для маппинга контекста (чтобы callback_data был коротким)
+        await db.execute("CREATE TABLE IF NOT EXISTS context_map (id INTEGER PRIMARY KEY AUTOINCREMENT, val TEXT UNIQUE)")
         await db.commit()
+
+# Хелперы для работы с короткими ID для callback_data
+async def get_ctx_id(val: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO context_map (val) VALUES (?)", (val,))
+        await db.commit()
+        res = await db.execute("SELECT id FROM context_map WHERE val = ?", (val,))
+        row = await res.fetchone()
+        return row[0]
+
+async def get_ctx_val(ctx_id: int) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute("SELECT val FROM context_map WHERE id = ?", (ctx_id,))
+        row = await res.fetchone()
+        return row[0] if row else None
 
 def parse_price(price_str):
     if not price_str: return 0.0
@@ -188,18 +205,8 @@ def get_weapon_types_kb(items):
     btns.append([KeyboardButton(text="🔙 К категориям")])
     return ReplyKeyboardMarkup(keyboard=btns, resize_keyboard=True)
 
-# Функция байт-безопасного обрезания строки для callback_data
-def truncate_callback_value(val: str, max_bytes: int = 32) -> str:
-    if not val:
-        return ""
-    encoded = val.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return val
-    # Декодируем обратно с игнорированием битых символов на конце
-    return encoded[:max_bytes].decode("utf-8", errors="ignore")
-
-# Оптимизированный генератор инлайн кнопок (Stateless pagination)
-def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
+# Универсальный генератор инлайн кнопок (Stateless pagination via IDs)
+async def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
     ITEMS_PER_PAGE = 8
     start = page * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
@@ -210,24 +217,23 @@ def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
         btn_text = f"{name} (x{amount})"
         if len(btn_text) > 40: btn_text = btn_text[:37] + "..."
         
-        # Если это треклист, вызываем специальный вьювер
         if mode == "trc":
             keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"trv_{item_id}")])
         else:
             keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_{item_id}")])
     
-    # Кнопки навигации (упаковываем данные максимально плотно)
-    # pc = page category, pw = page weapon, pt = page tracking
+    # Кнопки навигации. Используем ID из context_map для экономии места.
     nav_row = []
     prefix = "pc" if mode == "cat" else "pw" if mode == "wep" else "pt"
     
-    # Байт-безопасное обрезание для соблюдения лимита 64 байт в callback_data
-    short_val = truncate_callback_value(value, 32)
+    ctx_id = 0
+    if value:
+        ctx_id = await get_ctx_id(value)
     
     if page > 0:
-        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}_{page-1}_{short_val}"))
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}_{page-1}_{ctx_id}"))
     if end < len(items_data):
-        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"{prefix}_{page+1}_{short_val}"))
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"{prefix}_{page+1}_{ctx_id}"))
     
     if nav_row:
         keyboard.append(nav_row)
@@ -293,7 +299,6 @@ async def open_inventory(m: Message, state: FSMContext):
         cats = [r[0] for r in await res.fetchall()]
         
         if not cats:
-            # Авто-восстановление, если пользователь в БД есть
             res_user = await db.execute("SELECT steam_id FROM users WHERE chat_id = ?", (m.chat.id,))
             user = await res_user.fetchone()
             if user:
@@ -367,7 +372,7 @@ async def send_paged_items(chat_id, category=None, weapon_type=None, page=0, mes
         if not message_id: await bot_instance.send_message(chat_id, "Ничего не найдено.")
         return
 
-    kb = get_items_inline_kb(rows, page, mode=mode, value=val)
+    kb = await get_items_inline_kb(rows, page, mode=mode, value=val)
     text = f"{title}\nСтраница {page+1}"
     
     if message_id:
@@ -386,10 +391,10 @@ async def cmd_tracking(m: Message):
         rows = await res.fetchall()
         
     if not rows: return await m.answer("Список отслеживания пуст.")
-    kb = get_items_inline_kb(rows, page=0, mode="trc")
+    kb = await get_items_inline_kb(rows, page=0, mode="trc")
     await m.answer("📈 Ваши отслеживаемые предметы:", reply_markup=kb)
 
-# === ГЛОБАЛЬНЫЙ ПАГИНАТОР (УЛЬТИМАТИВНЫЙ) ===
+# === ГЛОБАЛЬНЫЙ ПАГИНАТОР (УЛЬТИМАТИВНЫЙ ЧЕРЕЗ IDs) ===
 
 @dp.callback_query(F.data.startswith(("pc_", "pw_", "pt_")))
 async def handle_pagination(call: CallbackQuery):
@@ -397,14 +402,10 @@ async def handle_pagination(call: CallbackQuery):
         parts = call.data.split("_")
         prefix = parts[0]
         page = int(parts[1])
-        value = parts[2] if len(parts) > 2 else ""
+        ctx_id = int(parts[2]) if len(parts) > 2 else 0
 
-        # Если данные из callback_data обрезаны или отсутствуют (например, после рестарта)
-        # Мы берем категорию прямо из текста сообщения
-        if not value and prefix != "pt":
-            header = call.message.text.split("\n")[0]
-            if "📂 " in header: value = header.replace("📂 ", "").strip()
-            elif "🔫 " in header: value = header.replace("🔫 ", "").strip()
+        # Восстанавливаем полное название из context_map по ID
+        value = await get_ctx_val(ctx_id) if ctx_id > 0 else ""
 
         if prefix == "pc": # Page Category
             await send_paged_items(call.message.chat.id, category=value, page=page, message_id=call.message.message_id)
@@ -415,7 +416,7 @@ async def handle_pagination(call: CallbackQuery):
                 query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ?"
                 res = await db.execute(query, (call.message.chat.id,))
                 rows = await res.fetchall()
-            kb = get_items_inline_kb(rows, page=page, mode="trc")
+            kb = await get_items_inline_kb(rows, page=page, mode="trc")
             await call.message.edit_reply_markup(reply_markup=kb)
             
     except Exception as e:
