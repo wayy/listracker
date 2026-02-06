@@ -64,17 +64,38 @@ async def init_db():
 
 # Получение Steam ID
 async def resolve_steam_id(text):
-    if re.match(r'^\d{17}$', text): return text
-    match = re.search(r'profiles/(\d+)', text)
-    if match: return match.group(1)
-    vanity = re.search(r'id/([^/]+)', text)
+    text = text.strip()
+    
+    # 1. Если скинули чистый SteamID64 (17 цифр)
+    if re.match(r'^\d{17}$', text): 
+        return text
+    
+    # 2. Если ссылка вида profiles/123456...
+    # Регулярка ищет 'steamcommunity.com/profiles/' и берет цифры после этого
+    match = re.search(r'steamcommunity\.com/profiles/(\d+)', text)
+    if match: 
+        return match.group(1)
+    
+    # 3. Если ссылка вида id/custom_name (Vanity URL)
+    # Регулярка ищет 'steamcommunity.com/id/' и берет всё до следующего слеша
+    vanity = re.search(r'steamcommunity\.com/id/([^/]+)', text)
     if vanity:
-        url = f"https://steamcommunity.com/id/{vanity.group(1)}/?xml=1"
-        async with aiohttp.ClientSession(headers=HEADERS) as s:
-            async with s.get(url) as r:
-                content = await r.text()
-                res = re.search(r'<steamID64>(\d+)</steamID64>', content)
-                return res.group(1) if res else None
+        vanity_name = vanity.group(1)
+        # Делаем запрос к XML API стима для получения ID64
+        url = f"https://steamcommunity.com/id/{vanity_name}/?xml=1"
+        try:
+            async with aiohttp.ClientSession(headers=HEADERS) as s:
+                async with s.get(url, timeout=10) as r:
+                    if r.status != 200:
+                        return None
+                    content = await r.text()
+                    # Ищем тег <steamID64>
+                    res = re.search(r'<steamID64>(\d+)</steamID64>', content)
+                    return res.group(1) if res else None
+        except Exception as e:
+            logger.error(f"Ошибка при резолве Steam ID: {e}")
+            return None
+            
     return None
 
 # Загрузка инвентаря
@@ -119,7 +140,7 @@ async def start(m: Message, state: FSMContext):
 @dp.message(Registration.waiting_for_steam_link)
 async def process_link(m: Message, state: FSMContext):
     sid = await resolve_steam_id(m.text)
-    if not sid: return await m.answer("❌ Неверная ссылка или ID.")
+    if not sid: return await m.answer("❌ Неверная ссылка или ID, либо профиль не найден.")
     
     wait = await m.answer("⏳ Сканирую инвентарь...")
     items_counts = await fetch_inventory(sid)
