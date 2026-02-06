@@ -442,25 +442,44 @@ async def stop_tracking_handler(call: CallbackQuery):
 
 @dp.callback_query(F.data.contains("_page_"))
 async def paginate_handler(call: CallbackQuery, state: FSMContext):
-    prefix, page_str = call.data.rsplit("_page_", 1)
-    page = int(page_str)
+    try:
+        prefix, page_str = call.data.rsplit("_page_", 1)
+        page = int(page_str)
+        
+        # Получаем заголовок для извлечения контекста (категория или оружие)
+        header = call.message.text.split("\n")[0]
+        
+        if prefix == "catitem":
+            # Формат: "📂 Категория"
+            if "📂 " in header:
+                category = header.split("📂 ", 1)[1].strip()
+                await send_inline_items(call.message.chat.id, category=category, page=page, message_id=call.message.message_id)
+                
+        elif prefix == "wskin":
+            # Формат: "🔫 Оружие"
+            # Пытаемся достать из текста, чтобы не зависеть от state
+            if "🔫 " in header:
+                w_type = header.split("🔫 ", 1)[1].strip()
+                await send_inline_items(call.message.chat.id, weapon_type=w_type, page=page, message_id=call.message.message_id)
+            else:
+                # Если вдруг заголовок не распарсился, пробуем state
+                data = await state.get_data()
+                w_type = data.get("current_weapon_type")
+                if w_type:
+                    await send_inline_items(call.message.chat.id, weapon_type=w_type, page=page, message_id=call.message.message_id)
+
+        elif prefix == "tracklist":
+            async with aiosqlite.connect(DB_PATH) as db:
+                query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ?"
+                res = await db.execute(query, (call.message.chat.id,))
+                rows = await res.fetchall()
+            kb = get_items_inline_kb(rows, page=page, prefix="tracklist")
+            await call.message.edit_reply_markup(reply_markup=kb)
+            
+    except Exception as e:
+        logger.error(f"Pagination error: {e}")
     
-    if prefix == "catitem":
-        cat_line = call.message.text.split("\n")[0]
-        category = cat_line.replace("📂 ", "")
-        await send_inline_items(call.message.chat.id, category=category, page=page, message_id=call.message.message_id)
-    elif prefix == "wskin":
-        data = await state.get_data()
-        w_type = data.get("current_weapon_type")
-        if w_type:
-            await send_inline_items(call.message.chat.id, weapon_type=w_type, page=page, message_id=call.message.message_id)
-    elif prefix == "tracklist":
-        async with aiosqlite.connect(DB_PATH) as db:
-            query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ?"
-            res = await db.execute(query, (call.message.chat.id,))
-            rows = await res.fetchall()
-        kb = get_items_inline_kb(rows, page=page, prefix="tracklist")
-        await call.message.edit_reply_markup(reply_markup=kb)
+    # Всегда отвечаем на колбэк, чтобы кнопка не крутилась бесконечно
     await call.answer()
 
 @dp.callback_query(F.data.startswith("view_"))
