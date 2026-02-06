@@ -36,7 +36,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # Константы
-TOKEN = os.getenv("BOT_TOKEN", "5070946103:AAFG8N40n9IPR3APhYxMeD-mB81-D7ss7Es")
+TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 APP_ID = 730  # CS2
 
 # Путь к БД
@@ -204,7 +204,7 @@ def get_weapon_types_kb(items):
     return ReplyKeyboardMarkup(keyboard=btns, resize_keyboard=True)
 
 async def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
-    ITEMS_PER_PAGE = 8
+    ITEMS_PER_PAGE = 10 # Увеличили до 10 предметов на страницу
     start = page * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
     current_page_items = items_data[start:end]
@@ -222,13 +222,12 @@ async def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
     nav_row = []
     prefix = "pc" if mode == "cat" else "pw" if mode == "wep" else "pt"
     
-    # Сохраняем значение в маппинг контекста для callback_data
     ctx_id = await get_ctx_id(value) if value else 0
     
     if page > 0:
-        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}_{page-1}_{ctx_id}"))
+        nav_row.append(InlineKeyboardButton(text="⬅️ Пред. страница", callback_data=f"{prefix}_{page-1}_{ctx_id}"))
     if end < len(items_data):
-        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"{prefix}_{page+1}_{ctx_id}"))
+        nav_row.append(InlineKeyboardButton(text="След. страница ➡️", callback_data=f"{prefix}_{page+1}_{ctx_id}"))
     
     if nav_row:
         keyboard.append(nav_row)
@@ -342,13 +341,12 @@ async def show_weapon_type_items(m: Message, state: FSMContext):
     if m.text == "🔙 К категориям": return await open_inventory(m, state)
     await send_paged_items(m.chat.id, weapon_type=m.text, page=0)
 
-async def send_paged_items(chat_id, category=None, weapon_type=None, page=0, message_id=None):
+async def send_paged_items(chat_id, category=None, weapon_type=None, page=0):
     mode = "cat"
     val = category
     
     async with aiosqlite.connect(DB_PATH) as db:
         if weapon_type:
-            # Сортировка по количеству DESC обязательна для стабильной пагинации
             query = """SELECT i.id, i.name, ui.amount FROM items i JOIN user_items ui ON i.id = ui.item_id 
                        WHERE ui.chat_id = ? AND i.category = '🔫 Оружие' AND i.name LIKE ? ORDER BY ui.amount DESC, i.name ASC"""
             args = (chat_id, f"{weapon_type} | %")
@@ -365,32 +363,20 @@ async def send_paged_items(chat_id, category=None, weapon_type=None, page=0, mes
         rows = await res.fetchall()
 
     if not rows:
-        text_err = "❌ Предметы не найдены."
-        if message_id:
-            await bot_instance.edit_message_text(text_err, chat_id, message_id)
-        else:
-            await bot_instance.send_message(chat_id, text_err)
+        await bot_instance.send_message(chat_id, "❌ Предметы не найдены.")
         return
 
     kb = await get_items_inline_kb(rows, page, mode=mode, value=val)
-    # Показываем время обновления (секунды), чтобы Telegram не игнорировал edit_message_text
-    ts = datetime.now().strftime("%S")
-    text = f"*{title}*\nСтраница: {page+1} (обновлено в {ts}с)\u200b"
+    text = f"*{title}*\nСтраница: {page+1}"
     
-    if message_id:
-        try:
-            await bot_instance.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Edit message failed: {e}")
-    else:
-        await bot_instance.send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
+    # Мы всегда отправляем НОВОЕ сообщение вместо редактирования, чтобы избежать проблем с обновлением UI
+    await bot_instance.send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
 
 # === ОТСЛЕЖИВАНИЕ ===
 
 @dp.message(F.text == "📈 Отслеживание")
 async def cmd_tracking(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
-        # Добавлена сортировка для стабильной пагинации
         query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ? ORDER BY item_name ASC"
         res = await db.execute(query, (m.chat.id,))
         rows = await res.fetchall()
@@ -409,19 +395,17 @@ async def handle_pagination(call: CallbackQuery):
         page = int(parts[1])
         ctx_id = int(parts[2]) if len(parts) > 2 else 0
 
-        # Восстанавливаем контекст из маппинга
         value = await get_ctx_val(ctx_id) if ctx_id > 0 else ""
         
         if ctx_id > 0 and value is None:
             return await call.answer("⚠️ Сессия истекла. Откройте меню заново.", show_alert=True)
 
         if prefix == "pc":
-            await send_paged_items(call.message.chat.id, category=value, page=page, message_id=call.message.message_id)
+            await send_paged_items(call.message.chat.id, category=value, page=page)
         elif prefix == "pw":
-            await send_paged_items(call.message.chat.id, weapon_type=value, page=page, message_id=call.message.message_id)
+            await send_paged_items(call.message.chat.id, weapon_type=value, page=page)
         elif prefix == "pt":
             async with aiosqlite.connect(DB_PATH) as db:
-                # Стабильная сортировка и здесь
                 query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ? ORDER BY item_name ASC"
                 res = await db.execute(query, (call.message.chat.id,))
                 rows = await res.fetchall()
@@ -430,11 +414,9 @@ async def handle_pagination(call: CallbackQuery):
                 return await call.answer("Список пуст.", show_alert=True)
                 
             kb = await get_items_inline_kb(rows, page=page, mode="trc", value="tracking_list")
-            ts = datetime.now().strftime("%S")
-            await bot_instance.edit_message_text(
-                f"*📈 Ваши отслеживаемые предметы:*\nСтраница: {page+1} (обновлено в {ts}с)\u200b",
+            await bot_instance.send_message(
                 call.message.chat.id,
-                call.message.message_id,
+                f"*📈 Ваши отслеживаемые предметы:*\nСтраница: {page+1}",
                 reply_markup=kb,
                 parse_mode="Markdown"
             )
@@ -480,7 +462,7 @@ async def handle_add_track(call: CallbackQuery):
         try:
             await db.execute("INSERT INTO tracking (chat_id, item_name, last_price) VALUES (?,?,?)", (call.message.chat.id, name, price_val))
             await db.commit()
-            await call.message.edit_text(f"{call.message.text}\n\n✅ *Отслеживание запущено!*", parse_mode="Markdown")
+            await call.message.answer(f"✅ *Отслеживание запущено!*\nПредмет: `{name}`", parse_mode="Markdown")
         except: await call.answer("Вы уже отслеживаете этот предмет", show_alert=True)
 
 @dp.callback_query(F.data.startswith("trv_"))
@@ -503,7 +485,7 @@ async def handle_del_track(call: CallbackQuery):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM tracking WHERE id = ?", (track_id,))
         await db.commit()
-    await call.message.edit_text(f"❌ *Отслеживание остановлено.*", parse_mode="Markdown")
+    await call.message.answer(f"❌ *Отслеживание остановлено.*", parse_mode="Markdown")
     await call.answer()
 
 @dp.message()
