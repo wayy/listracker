@@ -222,7 +222,7 @@ async def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
     nav_row = []
     prefix = "pc" if mode == "cat" else "pw" if mode == "wep" else "pt"
     
-    # Гарантируем получение ID или выбрасываем исключение для отладки
+    # Сохраняем значение в маппинг контекста для callback_data
     ctx_id = await get_ctx_id(value) if value else 0
     
     if page > 0:
@@ -348,15 +348,16 @@ async def send_paged_items(chat_id, category=None, weapon_type=None, page=0, mes
     
     async with aiosqlite.connect(DB_PATH) as db:
         if weapon_type:
+            # Сортировка по количеству DESC обязательна для стабильной пагинации
             query = """SELECT i.id, i.name, ui.amount FROM items i JOIN user_items ui ON i.id = ui.item_id 
-                       WHERE ui.chat_id = ? AND i.category = '🔫 Оружие' AND i.name LIKE ? ORDER BY ui.amount DESC"""
+                       WHERE ui.chat_id = ? AND i.category = '🔫 Оружие' AND i.name LIKE ? ORDER BY ui.amount DESC, i.name ASC"""
             args = (chat_id, f"{weapon_type} | %")
             title = f"🔫 {weapon_type}"
             mode = "wep"
             val = weapon_type
         else:
             query = """SELECT i.id, i.name, ui.amount FROM items i JOIN user_items ui ON i.id = ui.item_id 
-                       WHERE ui.chat_id = ? AND i.category = ? ORDER BY ui.amount DESC"""
+                       WHERE ui.chat_id = ? AND i.category = ? ORDER BY ui.amount DESC, i.name ASC"""
             args = (chat_id, category)
             title = f"📂 {category}"
             
@@ -372,9 +373,9 @@ async def send_paged_items(chat_id, category=None, weapon_type=None, page=0, mes
         return
 
     kb = await get_items_inline_kb(rows, page, mode=mode, value=val)
-    # Добавляем невидимый символ \u200b в конце текста, чтобы Telegram гарантированно обновил сообщение
-    # даже если номер страницы визуально не изменился (предотвращает игнорирование обновления)
-    text = f"*{title}*\nСтраница: {page+1}\u200b"
+    # Показываем время обновления (секунды), чтобы Telegram не игнорировал edit_message_text
+    ts = datetime.now().strftime("%S")
+    text = f"*{title}*\nСтраница: {page+1} (обновлено в {ts}с)\u200b"
     
     if message_id:
         try:
@@ -389,12 +390,13 @@ async def send_paged_items(chat_id, category=None, weapon_type=None, page=0, mes
 @dp.message(F.text == "📈 Отслеживание")
 async def cmd_tracking(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
-        query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ?"
+        # Добавлена сортировка для стабильной пагинации
+        query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ? ORDER BY item_name ASC"
         res = await db.execute(query, (m.chat.id,))
         rows = await res.fetchall()
         
     if not rows: return await m.answer("Список отслеживания пуст.")
-    kb = await get_items_inline_kb(rows, page=0, mode="trc")
+    kb = await get_items_inline_kb(rows, page=0, mode="trc", value="tracking_list")
     await m.answer("*📈 Ваши отслеживаемые предметы:*\nСтраница: 1", reply_markup=kb, parse_mode="Markdown")
 
 # === ГЛОБАЛЬНЫЙ ПАГИНАТОР ===
@@ -407,11 +409,10 @@ async def handle_pagination(call: CallbackQuery):
         page = int(parts[1])
         ctx_id = int(parts[2]) if len(parts) > 2 else 0
 
-        # Восстанавливаем контекст
+        # Восстанавливаем контекст из маппинга
         value = await get_ctx_val(ctx_id) if ctx_id > 0 else ""
         
-        # Если контекст потерян (ctx_id > 0 но value None), выводим алерт
-        if ctx_id > 0 and not value:
+        if ctx_id > 0 and value is None:
             return await call.answer("⚠️ Сессия истекла. Откройте меню заново.", show_alert=True)
 
         if prefix == "pc":
@@ -420,16 +421,18 @@ async def handle_pagination(call: CallbackQuery):
             await send_paged_items(call.message.chat.id, weapon_type=value, page=page, message_id=call.message.message_id)
         elif prefix == "pt":
             async with aiosqlite.connect(DB_PATH) as db:
-                query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ?"
+                # Стабильная сортировка и здесь
+                query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ? ORDER BY item_name ASC"
                 res = await db.execute(query, (call.message.chat.id,))
                 rows = await res.fetchall()
             
             if not rows:
                 return await call.answer("Список пуст.", show_alert=True)
                 
-            kb = await get_items_inline_kb(rows, page=page, mode="trc")
+            kb = await get_items_inline_kb(rows, page=page, mode="trc", value="tracking_list")
+            ts = datetime.now().strftime("%S")
             await bot_instance.edit_message_text(
-                f"*📈 Ваши отслеживаемые предметы:*\nСтраница: {page+1}\u200b",
+                f"*📈 Ваши отслеживаемые предметы:*\nСтраница: {page+1} (обновлено в {ts}с)\u200b",
                 call.message.chat.id,
                 call.message.message_id,
                 reply_markup=kb,
@@ -438,12 +441,10 @@ async def handle_pagination(call: CallbackQuery):
             
     except Exception as e:
         logger.error(f"Pagination failed: {e}")
-        # Выводим алерт только если мы не успели ответить на коллбэк
         try:
             await call.answer("❌ Ошибка при переключении страницы.", show_alert=True)
         except: pass
     finally:
-        # Единственный call.answer() для завершения анимации загрузки кнопки
         try:
             await call.answer()
         except: pass
