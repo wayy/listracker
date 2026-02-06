@@ -80,12 +80,24 @@ async def init_db():
 # Парсинг цены из строки Steam (например "1 234,50 pуб.")
 def parse_price(price_str):
     if not price_str: return 0.0
-    # Оставляем только цифры и запятую/точку
+    # Оставляем только цифры, запятые и точки
     clean = re.sub(r'[^\d.,]', '', price_str)
+    # Убираем точку в конце (частая проблема от "руб.")
+    clean = clean.strip('.')
+    # Заменяем запятую на точку
     clean = clean.replace(',', '.')
+    
     try:
         return float(clean)
     except ValueError:
+        # Fallback: если после замены получилось 1.234.56 (из-за разделителей тысяч),
+        # пробуем оставить только последнюю точку
+        try:
+            if clean.count('.') > 1:
+                parts = clean.rsplit('.', 1)
+                clean = parts[0].replace('.', '') + '.' + parts[1]
+                return float(clean)
+        except: pass
         return 0.0
 
 # Получение цены из Steam Market
