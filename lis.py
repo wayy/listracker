@@ -100,10 +100,8 @@ async def fetch_inventory(steam_id: str, app_id: int) -> list[str] | str | None:
     """
     Получает инвентарь с поддержкой пагинации и маппинга assets <-> descriptions.
     """
-    # Попытка через основной инвентарный API
     result = await _request_paginated_inventory(INVENTORY_BASE_URL, steam_id, app_id)
     
-    # Fallback на рыночный API
     if result is None or (isinstance(result, list) and not result):
         logger.info(f"Метод 1 не сработал для {steam_id}, пробуем рыночный эндпоинт...")
         result = await _request_paginated_inventory(MARKET_BASE_URL, steam_id, app_id)
@@ -166,6 +164,9 @@ async def get_item_price(name, app_id):
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         try:
             async with session.get(url, timeout=15) as resp:
+                if resp.status == 429:
+                    await asyncio.sleep(10) # Мини-пауза при лимите цен
+                    return None
                 if resp.status != 200:
                     return None
                 data = await resp.json()
@@ -241,7 +242,8 @@ async def cmd_start(message: Message, state: FSMContext):
 async def cmd_items(message: Message):
     async with aiosqlite.connect("inventory.db") as db:
         res = await db.execute(
-            "SELECT i.market_hash_name FROM items i "
+            "SELECT i.market_hash_name, (SELECT p.lowest_price FROM prices p WHERE p.item_id = i.id ORDER BY p.timestamp DESC LIMIT 1) as price "
+            "FROM items i "
             "JOIN user_items ui ON i.id = ui.item_id "
             "WHERE ui.chat_id = ?", (message.chat.id,)
         )
@@ -250,13 +252,24 @@ async def cmd_items(message: Message):
             return await message.answer("Список предметов пуст. Сначала привяжите профиль через /start")
         
         count = len(rows)
-        text = f"📦 *Ваши предметы в базе ({count}):*\n\n" + "\n".join([f"• `{r[0]}`" for r in rows[:40]])
-        if count > 40: text += f"\n\n...и еще {count - 40} предметов."
+        total_sum = sum([r[1] for r in rows if r[1] is not None])
+        
+        text = f"📦 *Ваши предметы ({count}):*\n"
+        text += f"💰 *Общая стоимость:* `{total_sum:.2f} ₽`\n\n"
+        
+        # Показываем первые 30 предметов с ценами
+        items_list = []
+        for r in rows[:30]:
+            p_text = f"{r[1]:.2f} ₽" if r[1] else "нет данных"
+            items_list.append(f"• `{r[0]}` — *{p_text}*")
+            
+        text += "\n".join(items_list)
+        if count > 30: text += f"\n\n...и еще {count - 30} предметов."
         await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Registration.waiting_for_steam_link)
 async def process_link(message: Message, state: FSMContext):
-    msg = await message.answer("🔄 Обращаюсь к Steam API...")
+    msg = await message.answer("🔄 Сканирую инвентарь (это может занять время)...")
     steam_id = await resolve_steam_id(message.text)
     
     if not steam_id:
@@ -267,33 +280,48 @@ async def process_link(message: Message, state: FSMContext):
     if result == "PRIVATE":
         return await msg.edit_text("❌ Ошибка доступа (403). Проверьте приватность инвентаря в Steam.")
     elif result == "RATE_LIMIT":
-        return await msg.edit_text("⚠️ Ошибка 429. Steam временно ограничил запросы. Попробуйте через 15 минут.")
+        return await msg.edit_text("⚠️ Ошибка 429. Steam ограничил запросы. Попробуйте через 15 минут.")
     elif result is None:
-        return await msg.edit_text("❌ Ошибка Steam. API может быть временно недоступен.")
+        return await msg.edit_text("❌ Ошибка Steam API.")
     elif isinstance(result, list) and len(result) == 0:
-        return await msg.edit_text("⚠️ В инвентаре не найдено ликвидных предметов CS2.")
+        return await msg.edit_text("⚠️ В инвентаре не найдено предметов CS2.")
 
-    # СРАЗУ сохраняем всё в базу данных, чтобы /items работал мгновенно
+    await msg.edit_text(f"✅ Найдено предметов: {len(result)}. Начинаю оценку стоимости...")
+
+    total_value = 0.0
+    items_count = len(result)
+    
     async with aiosqlite.connect("inventory.db") as db:
-        # Сохраняем пользователя
         await db.execute("INSERT OR REPLACE INTO users (chat_id, steam_id) VALUES (?, ?)", (message.chat.id, steam_id))
-        # Очищаем старые связи
         await db.execute("DELETE FROM user_items WHERE chat_id = ?", (message.chat.id,))
         
-        # Инъекция всех найденных предметов в таблицу предметов и связей
-        for item_name in result:
+        # Оцениваем первые 20 предметов сразу для фиксации цены, остальные в фоне
+        # (Steam сильно ограничивает запросы к ценам, поэтому массово всё сразу не оценить без прокси)
+        for i, item_name in enumerate(result):
             await db.execute("INSERT OR IGNORE INTO items (market_hash_name, appid) VALUES (?, ?)", (item_name, APP_ID))
-            # Получаем ID предмета (существующий или новый)
             res = await db.execute("SELECT id FROM items WHERE market_hash_name = ?", (item_name,))
             row = await res.fetchone()
             if row:
                 item_id = row[0]
                 await db.execute("INSERT OR IGNORE INTO user_items (chat_id, item_id) VALUES (?, ?)", (message.chat.id, item_id))
+                
+                # Запрашиваем цену только для части предметов сразу, чтобы не словить бан
+                if i < 15:
+                    price = await get_item_price(item_name, APP_ID)
+                    if price:
+                        total_value += price
+                        await db.execute("INSERT INTO prices (item_id, lowest_price, timestamp) VALUES (?, ?, ?)", (item_id, price, datetime.now()))
+                        await asyncio.sleep(2) # Задержка для цен
         
         await db.commit()
     
     await state.clear()
-    await msg.edit_text(f"✅ Успех! Найдено и сохранено предметов: {len(result)}.\nИспользуйте /items для списка.")
+    await msg.edit_text(
+        f"📊 *Инвентарь привязан!*\n\n"
+        f"Всего предметов: `{items_count}`\n"
+        f"Примерная сумма (первых 15): `{total_value:.2f} ₽`\n\n"
+        f"Полный список и история цен будут доступны через /items (обновляется в фоне)."
+    , parse_mode="Markdown")
 
 async def main():
     await init_db()
