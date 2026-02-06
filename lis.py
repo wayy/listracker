@@ -118,9 +118,13 @@ async def get_steam_price(item_name):
 # Steam ID
 async def resolve_steam_id(text):
     text = text.strip()
+    if text.endswith('/'): text = text[:-1] # Убираем слеш в конце если есть
+    
     if re.match(r'^\d{17}$', text): return text
+    
     match = re.search(r'steamcommunity\.com/profiles/(\d+)', text)
     if match: return match.group(1)
+    
     vanity = re.search(r'steamcommunity\.com/id/([^/]+)', text)
     if vanity:
         vanity_name = vanity.group(1)
@@ -219,28 +223,41 @@ async def update_inventory_logic(m: Message, state: FSMContext):
     if items_counts is None: return await wait.edit_text("❌ Ошибка доступа. Проверь настройки приватности Steam.")
     if not items_counts: return await wait.edit_text("📦 Инвентарь пуст.")
 
-    async with aiosqlite.connect("inventory.db") as db:
-        await db.execute("INSERT OR REPLACE INTO users VALUES (?,?)", (m.chat.id, sid))
-        await db.execute("DELETE FROM user_items WHERE chat_id = ?", (m.chat.id,))
-        for name, count in items_counts.items():
-            cat = get_item_category(name)
-            await db.execute("INSERT OR IGNORE INTO items (name, category) VALUES (?,?)", (name, cat))
-            res = await db.execute("SELECT id FROM items WHERE name = ?", (name,))
-            item_id = (await res.fetchone())[0]
-            await db.execute("INSERT INTO user_items (chat_id, item_id, amount) VALUES (?,?,?)", (m.chat.id, item_id, count))
-        await db.commit()
+    # Безопасное обновление БД в транзакции
+    try:
+        async with aiosqlite.connect("inventory.db") as db:
+            await db.execute("BEGIN TRANSACTION")
+            await db.execute("INSERT OR REPLACE INTO users VALUES (?,?)", (m.chat.id, sid))
+            # Сначала удаляем старое, но в рамках транзакции
+            await db.execute("DELETE FROM user_items WHERE chat_id = ?", (m.chat.id,))
+            
+            for name, count in items_counts.items():
+                cat = get_item_category(name)
+                await db.execute("INSERT OR IGNORE INTO items (name, category) VALUES (?,?)", (name, cat))
+                res = await db.execute("SELECT id FROM items WHERE name = ?", (name,))
+                item_id = (await res.fetchone())[0]
+                await db.execute("INSERT INTO user_items (chat_id, item_id, amount) VALUES (?,?,?)", (m.chat.id, item_id, count))
+            
+            await db.commit()
+    except Exception as e:
+        logger.error(f"DB Error: {e}")
+        return await wait.edit_text("❌ Ошибка при сохранении базы данных.")
 
     await wait.delete()
     await m.answer(f"✅ Успех! Найдено предметов: `{len(items_counts)}`.\nДанные обновлены!", 
                    reply_markup=get_main_menu_kb(), parse_mode="Markdown")
     await state.clear()
 
-# === ОБРАБОТЧИКИ ===
+# === ОБРАБОТЧИКИ (ПОРЯДОК ВАЖЕН!) ===
 
+# 1. Ссылки на стим - самый высокий приоритет, чтобы обновлять инвентарь в любой момент
+@dp.message(F.text.contains("steamcommunity.com"))
+async def global_link_update(m: Message, state: FSMContext):
+    await update_inventory_logic(m, state)
+
+# 2. Команда Start
 @dp.message(Command("start"))
 async def start(m: Message, state: FSMContext):
-    # Если пользователь есть в базе, просто показываем меню
-    # Но если у него пустой инвентарь (баг или сбой), лучше предложить обновить
     async with aiosqlite.connect("inventory.db") as db:
         res = await db.execute("SELECT steam_id FROM users WHERE chat_id = ?", (m.chat.id,))
         user = await res.fetchone()
@@ -252,18 +269,12 @@ async def start(m: Message, state: FSMContext):
         await m.answer("👋 Привет! Пришли ссылку на Steam профиль для настройки.\n\nИнвентарь должен быть открыт!")
         await state.set_state(Registration.waiting_for_steam_link)
 
-# Обработчик, если бот явно ждет ссылку (через стейт)
+# 3. Явное ожидание ссылки (если нажали /start и бот ждет)
 @dp.message(Registration.waiting_for_steam_link)
 async def process_link(m: Message, state: FSMContext):
     await update_inventory_logic(m, state)
 
-# ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ДЛЯ ССЫЛОК
-# Позволяет скинуть ссылку в любой момент для обновления инвентаря
-@dp.message(F.text.contains("steamcommunity.com"))
-async def global_link_update(m: Message, state: FSMContext):
-    await update_inventory_logic(m, state)
-
-# === ЛОГИКА ИНВЕНТАРЯ ===
+# === МЕНЮ ИНВЕНТАРЯ ===
 
 @dp.message(F.text == "📦 Инвентарь")
 async def open_inventory_menu(m: Message, state: FSMContext):
@@ -273,6 +284,12 @@ async def open_inventory_menu(m: Message, state: FSMContext):
         if not cats: return await m.answer("Инвентарь пуст или не загружен. Отправьте ссылку на профиль Steam еще раз для обновления.")
         await m.answer("Выберите категорию:", reply_markup=get_categories_kb(cats))
         await state.set_state(Registration.selecting_category)
+
+# Явный обработчик для Оружия (чтобы работало даже при сбое стейта)
+@dp.message(F.text == "🔫 Оружие")
+async def show_weapon_category_shortcut(m: Message, state: FSMContext):
+    await state.set_state(Registration.selecting_category) # Восстанавливаем стейт принудительно
+    await show_cat(m, state)
 
 @dp.message(Registration.selecting_category)
 async def show_cat(m: Message, state: FSMContext):
@@ -341,10 +358,9 @@ async def send_inline_items(chat_id, category=None, weapon_type=None, page=0, me
 @dp.message(F.text == "📈 Отслеживание")
 async def tracking_menu_cmd(m: Message):
     async with aiosqlite.connect("inventory.db") as db:
-        # Получаем список отслеживаемого
         query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ?"
         res = await db.execute(query, (m.chat.id,))
-        rows = await res.fetchall() # (id, name, last_price)
+        rows = await res.fetchall()
         
     if not rows:
         return await m.answer("Вы пока ничего не отслеживаете.\nНайдите предмет в Инвентаре и нажмите 'Отслеживать'.")
@@ -364,8 +380,6 @@ async def view_tracked_item(call: CallbackQuery):
         return await call.answer("Запись не найдена (возможно, удалена).", show_alert=True)
         
     name, last_price = row
-    
-    # Получаем актуальную цену сейчас
     current_price, price_str = await get_steam_price(name)
     
     text = f"📦 *{name}*\n\n"
@@ -415,7 +429,6 @@ async def paginate_handler(call: CallbackQuery, state: FSMContext):
         else:
             await call.answer("Сессия истекла.", show_alert=True)
     elif prefix == "tracklist":
-        # Пагинация для трекинга
         async with aiosqlite.connect("inventory.db") as db:
             query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ?"
             res = await db.execute(query, (call.message.chat.id,))
@@ -463,7 +476,7 @@ async def add_tracking(call: CallbackQuery):
         except:
             await call.answer("Уже отслеживается!", show_alert=True)
 
-# === ВОССТАНОВЛЕНИЕ СОСТОЯНИЯ ===
+# === ВОССТАНОВЛЕНИЕ СОСТОЯНИЯ (Режим "Спасатель") ===
 
 @dp.message()
 async def handle_unknown(m: Message, state: FSMContext):
@@ -475,14 +488,15 @@ async def handle_unknown(m: Message, state: FSMContext):
 
     # Пытаемся понять контекст (восстановление сессии)
     async with aiosqlite.connect("inventory.db") as db:
-        # Проверка на категорию
+        # Проверка на категорию (регистронезависимо)
         res = await db.execute("SELECT 1 FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ? AND i.category = ? LIMIT 1", (m.chat.id, m.text))
         if await res.fetchone():
             await state.set_state(Registration.selecting_category)
             await show_cat(m, state)
             return
         
-        # Проверка на оружие
+        # Проверка на оружие (грубый поиск по началу строки)
+        # m.text может быть "AK-47"
         res = await db.execute("SELECT 1 FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ? AND i.category = '🔫 Оружие' AND i.name LIKE ? LIMIT 1", (m.chat.id, f"{m.text} | %"))
         if await res.fetchone():
             await state.set_state(Registration.selecting_weapon_type)
