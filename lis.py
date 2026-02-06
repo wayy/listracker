@@ -65,7 +65,6 @@ async def init_db():
         await db.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY, steam_id TEXT)")
         await db.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, category TEXT)")
         await db.execute("CREATE TABLE IF NOT EXISTS user_items (chat_id INTEGER, item_id INTEGER, amount INTEGER, PRIMARY KEY (chat_id, item_id))")
-        # Новая таблица для отслеживания
         await db.execute("""
             CREATE TABLE IF NOT EXISTS tracking (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,21 +76,15 @@ async def init_db():
         """)
         await db.commit()
 
-# Парсинг цены из строки Steam (например "1 234,50 pуб.")
+# Парсинг цены
 def parse_price(price_str):
     if not price_str: return 0.0
-    # Оставляем только цифры, запятые и точки
     clean = re.sub(r'[^\d.,]', '', price_str)
-    # Убираем точку в конце (частая проблема от "руб.")
     clean = clean.strip('.')
-    # Заменяем запятую на точку
     clean = clean.replace(',', '.')
-    
     try:
         return float(clean)
     except ValueError:
-        # Fallback: если после замены получилось 1.234.56 (из-за разделителей тысяч),
-        # пробуем оставить только последнюю точку
         try:
             if clean.count('.') > 1:
                 parts = clean.rsplit('.', 1)
@@ -102,9 +95,7 @@ def parse_price(price_str):
 
 # Получение цены из Steam Market
 async def get_steam_price(item_name):
-    # Кодируем название для URL (пробелы -> %20, | -> %7C и т.д.)
     encoded_name = urllib.parse.quote(item_name)
-    # currency=5 - это Рубли (RUB). 1 - USD.
     url = f"https://steamcommunity.com/market/priceoverview/?appid={APP_ID}&currency=5&market_hash_name={encoded_name}"
     
     async with aiohttp.ClientSession(headers=HEADERS) as s:
@@ -112,22 +103,19 @@ async def get_steam_price(item_name):
             async with s.get(url, timeout=5) as r:
                 if r.status == 200:
                     data = await r.json()
-                    # Берем lowest_price (минимальная цена продажи сейчас) или медиану
                     price_str = data.get("lowest_price") or data.get("median_price")
-                    if not price_str:
-                        return 0.0, "Нет лотов"
+                    if not price_str: return 0.0, "Нет лотов"
                     return parse_price(price_str), price_str
                 elif r.status == 429:
                     logger.warning(f"Steam Rate Limit (429) for {item_name}")
                     return None, "Rate Limit (подождите)"
                 else:
-                    logger.error(f"Steam API Error {r.status} for {item_name}")
                     return None, f"Ошибка Steam: {r.status}"
         except Exception as e:
             logger.error(f"Price fetch error for {item_name}: {e}")
             return None, "Ошибка сети"
 
-# Получение Steam ID
+# Steam ID
 async def resolve_steam_id(text):
     text = text.strip()
     if re.match(r'^\d{17}$', text): return text
@@ -161,10 +149,16 @@ async def fetch_inventory(steam_id):
         except: return None
 
 dp = Dispatcher()
-bot_instance = None # Глобальная ссылка на бота для фоновой задачи
+bot_instance = None
 
-# Клавиатура категорий
-def get_kb(items, add_back=False):
+# === КЛАВИАТУРЫ ===
+
+def get_main_menu_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="📦 Инвентарь"), KeyboardButton(text="📈 Отслеживание")]
+    ], resize_keyboard=True)
+
+def get_categories_kb(items):
     items = sorted(list(items))
     btns = []
     for i in range(0, len(items), 2):
@@ -172,15 +166,21 @@ def get_kb(items, add_back=False):
         if i + 1 < len(items):
             row.append(KeyboardButton(text=items[i+1]))
         btns.append(row)
-    if add_back:
-        btns.append([KeyboardButton(text="🔙 Назад")])
-    else:
-        btns.append([KeyboardButton(text="❌ Закрыть")])
+    btns.append([KeyboardButton(text="🔙 В главное меню")])
     return ReplyKeyboardMarkup(keyboard=btns, resize_keyboard=True)
 
-# Генератор инлайн-списка предметов с пагинацией
+def get_weapon_types_kb(items):
+    items = sorted(list(items))
+    btns = []
+    for i in range(0, len(items), 2):
+        row = [KeyboardButton(text=items[i])]
+        if i + 1 < len(items):
+            row.append(KeyboardButton(text=items[i+1]))
+        btns.append(row)
+    btns.append([KeyboardButton(text="🔙 К категориям")]) # Возврат в категории
+    return ReplyKeyboardMarkup(keyboard=btns, resize_keyboard=True)
+
 def get_items_inline_kb(items_data, page=0, prefix="item"):
-    # items_data: list of (id, name, amount)
     ITEMS_PER_PAGE = 8
     start = page * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
@@ -189,11 +189,16 @@ def get_items_inline_kb(items_data, page=0, prefix="item"):
     keyboard = []
     for item_id, name, amount in current_page_items:
         btn_text = f"{name} (x{amount})"
-        # Обрезаем имя, если слишком длинное для кнопки
         if len(btn_text) > 40: btn_text = btn_text[:37] + "..."
-        keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_{item_id}")])
+        # Для трекинга используем другой колбек если нужно, но пока используем универсальный view_
+        # Если это трекинг лист, там структура (id, name, last_price)
+        if prefix == "tracklist":
+            btn_text = f"{name} (~{amount} руб)" # тут amount это last_price
+            if len(btn_text) > 40: btn_text = btn_text[:37] + "..."
+            keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"trackview_{item_id}")])
+        else:
+            keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_{item_id}")])
     
-    # Кнопки навигации
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}_page_{page-1}"))
@@ -205,10 +210,21 @@ def get_items_inline_kb(items_data, page=0, prefix="item"):
         
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+# === ОБРАБОТЧИКИ START И МЕНЮ ===
+
 @dp.message(Command("start"))
 async def start(m: Message, state: FSMContext):
-    await m.answer("👋 Привет! Пришли ссылку на Steam профиль.\n\nИнвентарь должен быть открыт!")
-    await state.set_state(Registration.waiting_for_steam_link)
+    # Проверяем, зарегистрирован ли пользователь
+    async with aiosqlite.connect("inventory.db") as db:
+        res = await db.execute("SELECT steam_id FROM users WHERE chat_id = ?", (m.chat.id,))
+        user = await res.fetchone()
+        
+    if user:
+        await m.answer("🏠 Главное меню:", reply_markup=get_main_menu_kb())
+        await state.clear()
+    else:
+        await m.answer("👋 Привет! Пришли ссылку на Steam профиль для настройки.\n\nИнвентарь должен быть открыт!")
+        await state.set_state(Registration.waiting_for_steam_link)
 
 @dp.message(Registration.waiting_for_steam_link)
 async def process_link(m: Message, state: FSMContext):
@@ -224,10 +240,8 @@ async def process_link(m: Message, state: FSMContext):
     async with aiosqlite.connect("inventory.db") as db:
         await db.execute("INSERT OR REPLACE INTO users VALUES (?,?)", (m.chat.id, sid))
         await db.execute("DELETE FROM user_items WHERE chat_id = ?", (m.chat.id,))
-        cats = set()
         for name, count in items_counts.items():
             cat = get_item_category(name)
-            cats.add(cat)
             await db.execute("INSERT OR IGNORE INTO items (name, category) VALUES (?,?)", (name, cat))
             res = await db.execute("SELECT id FROM items WHERE name = ?", (name,))
             item_id = (await res.fetchone())[0]
@@ -235,24 +249,25 @@ async def process_link(m: Message, state: FSMContext):
         await db.commit()
 
     await wait.delete()
-    await m.answer(f"✅ Успех! Найдено предметов: `{len(items_counts)}`.\nВыбери категорию:", reply_markup=get_kb(cats), parse_mode="Markdown")
-    await state.set_state(Registration.selecting_category)
+    await m.answer(f"✅ Успех! Найдено предметов: `{len(items_counts)}`.\nДобро пожаловать в главное меню!", 
+                   reply_markup=get_main_menu_kb(), parse_mode="Markdown")
+    await state.clear()
 
-@dp.message(Command("items"))
-async def items_cmd(m: Message, state: FSMContext):
+# === ЛОГИКА ИНВЕНТАРЯ ===
+
+@dp.message(F.text == "📦 Инвентарь")
+async def open_inventory_menu(m: Message, state: FSMContext):
     async with aiosqlite.connect("inventory.db") as db:
         res = await db.execute("SELECT DISTINCT i.category FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ?", (m.chat.id,))
         cats = [r[0] for r in await res.fetchall()]
-        if not cats: return await m.answer("Сначала привяжи профиль через /start")
-        await m.answer("Выбери категорию:", reply_markup=get_kb(cats))
+        if not cats: return await m.answer("Инвентарь пуст или не загружен. Нажмите /start для обновления.")
+        await m.answer("Выберите категорию:", reply_markup=get_categories_kb(cats))
         await state.set_state(Registration.selecting_category)
-
-# === ОБРАБОТКА КАТЕГОРИЙ ===
 
 @dp.message(Registration.selecting_category)
 async def show_cat(m: Message, state: FSMContext):
-    if m.text == "❌ Закрыть":
-        await m.answer("Меню закрыто. /items для вызова.", reply_markup=ReplyKeyboardRemove())
+    if m.text == "🔙 В главное меню":
+        await m.answer("🏠 Главное меню", reply_markup=get_main_menu_kb())
         return await state.clear()
 
     if m.text == "🔫 Оружие":
@@ -266,22 +281,20 @@ async def show_cat(m: Message, state: FSMContext):
             for row in rows:
                 if "|" in row[0]: weapon_types.add(row[0].split("|")[0].strip())
             
-            await m.answer("🔫 Выбери тип оружия:", reply_markup=get_kb(weapon_types, add_back=True))
+            await m.answer("🔫 Выбери тип оружия:", reply_markup=get_weapon_types_kb(weapon_types))
             await state.set_state(Registration.selecting_weapon_type)
             return
 
-    # Показываем инлайн список для других категорий
     await send_inline_items(m.chat.id, category=m.text, page=0)
 
 @dp.message(Registration.selecting_weapon_type)
 async def show_weapon_skins(m: Message, state: FSMContext):
-    if m.text == "🔙 Назад": return await items_cmd(m, state)
+    if m.text == "🔙 К категориям": 
+        return await open_inventory_menu(m, state)
     
-    # Сохраняем выбранный тип оружия в state data, чтобы использовать при пагинации
     await state.update_data(current_weapon_type=m.text)
     await send_inline_items(m.chat.id, weapon_type=m.text, page=0)
 
-# Функция отправки/редактирования списка
 async def send_inline_items(chat_id, category=None, weapon_type=None, page=0, message_id=None):
     async with aiosqlite.connect("inventory.db") as db:
         if weapon_type:
@@ -289,49 +302,100 @@ async def send_inline_items(chat_id, category=None, weapon_type=None, page=0, me
                        WHERE ui.chat_id = ? AND i.category = '🔫 Оружие' AND i.name LIKE ? ORDER BY ui.amount DESC"""
             args = (chat_id, f"{weapon_type} | %")
             title = f"🔫 {weapon_type}"
-            cb_prefix = "wskin" # weapon skin
+            cb_prefix = "wskin"
         else:
             query = """SELECT i.id, i.name, ui.amount FROM items i JOIN user_items ui ON i.id = ui.item_id 
                        WHERE ui.chat_id = ? AND i.category = ? ORDER BY ui.amount DESC"""
             args = (chat_id, category)
             title = f"📂 {category}"
-            cb_prefix = "catitem" # category item
+            cb_prefix = "catitem"
             
         res = await db.execute(query, args)
-        rows = await res.fetchall() # [(id, name, amount), ...]
+        rows = await res.fetchall()
 
     if not rows:
-        if message_id: return # Нечего обновлять
-        await bot_instance.send_message(chat_id, "Ничего не найдено.")
+        if not message_id: await bot_instance.send_message(chat_id, "Ничего не найдено.")
         return
 
     kb = get_items_inline_kb(rows, page, prefix=cb_prefix)
-    
-    # Хак: сохраняем контекст в "memory" через замыкание или просто передаем параметры в callback
-    # Но для простоты, если мы меняем страницу, нам нужно знать категорию.
-    # Поэтому мы временно храним это в тексте сообщения или используем state, но в callback у нас нет state proxy так легко.
-    # Упрощение: используем глобальный FSM или просто пересобираем данные.
-    
     text = f"{title}\nСтраница {page+1}"
     
     if message_id:
-        try:
-            await bot_instance.edit_message_text(text, chat_id, message_id, reply_markup=kb)
+        try: await bot_instance.edit_message_text(text, chat_id, message_id, reply_markup=kb)
         except: pass
     else:
         await bot_instance.send_message(chat_id, text, reply_markup=kb)
 
-# === CALLBACK HANDLERS ===
+# === ЛОГИКА ОТСЛЕЖИВАНИЯ (TRACKING) ===
 
-# Пагинация
+@dp.message(F.text == "📈 Отслеживание")
+async def tracking_menu_cmd(m: Message):
+    async with aiosqlite.connect("inventory.db") as db:
+        # Получаем список отслеживаемого
+        query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ?"
+        res = await db.execute(query, (m.chat.id,))
+        rows = await res.fetchall() # (id, name, last_price)
+        
+    if not rows:
+        return await m.answer("Вы пока ничего не отслеживаете.\nНайдите предмет в Инвентаре и нажмите 'Отслеживать'.")
+        
+    kb = get_items_inline_kb(rows, page=0, prefix="tracklist")
+    await m.answer("📈 Ваши отслеживаемые предметы:", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("trackview_"))
+async def view_tracked_item(call: CallbackQuery):
+    track_id = int(call.data.split("_")[1])
+    
+    async with aiosqlite.connect("inventory.db") as db:
+        res = await db.execute("SELECT item_name, last_price FROM tracking WHERE id = ?", (track_id,))
+        row = await res.fetchone()
+        
+    if not row:
+        return await call.answer("Запись не найдена (возможно, удалена).", show_alert=True)
+        
+    name, last_price = row
+    
+    # Получаем актуальную цену сейчас
+    current_price, price_str = await get_steam_price(name)
+    
+    text = f"📦 *{name}*\n\n"
+    text += f"📌 Базовая цена: `{last_price}` руб.\n"
+    
+    if current_price:
+        diff = current_price - last_price
+        icon = "🟢" if diff > 0 else "🔴" if diff < 0 else "⚪️"
+        text += f"💰 Текущая цена: `{price_str}` ({icon} {diff:.2f})"
+    else:
+        text += f"💰 Текущая цена: `{price_str}`"
+        
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Перестать отслеживать", callback_data=f"stoptrack_{track_id}")]
+    ])
+    
+    # Редактируем сообщение (или отправляем новое, если это был список)
+    # Лучше отправить новое, чтобы список остался выше
+    await call.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("stoptrack_"))
+async def stop_tracking_handler(call: CallbackQuery):
+    track_id = int(call.data.split("_")[1])
+    
+    async with aiosqlite.connect("inventory.db") as db:
+        await db.execute("DELETE FROM tracking WHERE id = ?", (track_id,))
+        await db.commit()
+        
+    await call.message.edit_text(f"❌ *Отслеживание остановлено.*\nПредмет удален из списка.", parse_mode="Markdown")
+    await call.answer()
+
+# === CALLBACK ОБЩИЕ ===
+
 @dp.callback_query(F.data.contains("_page_"))
-async def paginate_items(call: CallbackQuery, state: FSMContext):
+async def paginate_handler(call: CallbackQuery, state: FSMContext):
     prefix, page_str = call.data.rsplit("_page_", 1)
     page = int(page_str)
     
-    # Пытаемся понять контекст
     if prefix == "catitem":
-        # Получаем категорию из текста сообщения
         cat_line = call.message.text.split("\n")[0]
         category = cat_line.replace("📂 ", "")
         await send_inline_items(call.message.chat.id, category=category, page=page, message_id=call.message.message_id)
@@ -341,139 +405,115 @@ async def paginate_items(call: CallbackQuery, state: FSMContext):
         if w_type:
             await send_inline_items(call.message.chat.id, weapon_type=w_type, page=page, message_id=call.message.message_id)
         else:
-            await call.answer("Сессия истекла, выберите оружие заново.")
-    
+            await call.answer("Сессия истекла.", show_alert=True)
+    elif prefix == "tracklist":
+        # Пагинация для трекинга
+        async with aiosqlite.connect("inventory.db") as db:
+            query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ?"
+            res = await db.execute(query, (call.message.chat.id,))
+            rows = await res.fetchall()
+        kb = get_items_inline_kb(rows, page=page, prefix="tracklist")
+        await call.message.edit_reply_markup(reply_markup=kb)
+            
     await call.answer()
 
-# Просмотр предмета
 @dp.callback_query(F.data.startswith("view_"))
-async def view_item_details(call: CallbackQuery):
+async def view_inventory_item(call: CallbackQuery):
     item_id = int(call.data.split("_")[1])
-    
     await call.answer("🔎 Сканирую цену...")
     
     async with aiosqlite.connect("inventory.db") as db:
         res = await db.execute("SELECT name FROM items WHERE id = ?", (item_id,))
         row = await res.fetchone()
-        if not row: return await call.answer("Предмет не найден в БД.")
+        if not row: return await call.answer("Предмет не найден.")
         name = row[0]
     
     price_val, price_str = await get_steam_price(name)
-    
     text = f"📦 *Предмет:* `{name}`\n"
     if price_val:
         text += f"💰 *Цена:* `{price_str}`"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📈 Отслеживать", callback_data=f"track_{item_id}")]
-        ])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Отслеживать", callback_data=f"track_{item_id}")]])
     else:
-        # Показываем причину ошибки, если она есть в price_str (наше сообщение об ошибке)
-        error_msg = price_str if price_str else "Не удалось получить или предмет не продается."
-        text += f"⚠️ *Ошибка:* {error_msg}\n\nПопробуйте через минуту."
+        text += f"⚠️ *Ошибка:* {price_str}"
         kb = None
         
     await call.message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
-# Начало отслеживания
 @dp.callback_query(F.data.startswith("track_"))
-async def start_tracking(call: CallbackQuery):
+async def add_tracking(call: CallbackQuery):
     item_id = int(call.data.split("_")[1])
-    
     async with aiosqlite.connect("inventory.db") as db:
         res = await db.execute("SELECT name FROM items WHERE id = ?", (item_id,))
         name = (await res.fetchone())[0]
-        
-        # Получаем текущую цену как базовую
         price_val, _ = await get_steam_price(name)
-        if not price_val:
-            return await call.answer("Не могу отслеживать: нет цены.", show_alert=True)
-            
+        
+        if not price_val: return await call.answer("Нет цены - нельзя отслеживать.", show_alert=True)
         try:
-            await db.execute("INSERT INTO tracking (chat_id, item_name, last_price) VALUES (?,?,?)",
-                             (call.message.chat.id, name, price_val))
+            await db.execute("INSERT INTO tracking (chat_id, item_name, last_price) VALUES (?,?,?)", (call.message.chat.id, name, price_val))
             await db.commit()
-            await call.message.edit_text(f"{call.message.text}\n\n✅ *Отслеживание запущено!*\nЯ напишу, если цена вырастет.", parse_mode="Markdown")
+            await call.message.edit_text(f"{call.message.text}\n\n✅ *Отслеживание запущено!*", parse_mode="Markdown")
         except:
-            await call.answer("Вы уже отслеживаете этот предмет!", show_alert=True)
+            await call.answer("Уже отслеживается!", show_alert=True)
 
-# === ОБРАБОТЧИК НЕИЗВЕСТНЫХ СООБЩЕНИЙ (восстановление сессии) ===
+# === ВОССТАНОВЛЕНИЕ СОСТОЯНИЯ ===
 
 @dp.message()
-async def handle_unknown_state(m: Message, state: FSMContext):
-    # Обработка навигации
-    if m.text == "❌ Закрыть":
-        await m.answer("Меню закрыто.", reply_markup=ReplyKeyboardRemove())
-        return await state.clear()
-    if m.text == "🔙 Назад":
-        return await items_cmd(m, state)
+async def handle_unknown(m: Message, state: FSMContext):
+    # Если это просто текст, проверяем, не навигация ли это
+    if m.text == "🔙 В главное меню":
+        await m.answer("🏠 Главное меню", reply_markup=get_main_menu_kb())
+        await state.clear()
+        return
 
+    # Пытаемся понять контекст (восстановление сессии)
     async with aiosqlite.connect("inventory.db") as db:
-        # 1. Проверяем, является ли текст категорией
+        # Проверка на категорию
         res = await db.execute("SELECT 1 FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ? AND i.category = ? LIMIT 1", (m.chat.id, m.text))
         if await res.fetchone():
             await state.set_state(Registration.selecting_category)
             await show_cat(m, state)
             return
         
-        # 2. Проверяем, является ли текст типом оружия (AK-47 и т.д.)
-        # Ищем любой предмет, который начинается с "Текст |" в категории Оружие
+        # Проверка на оружие
         res = await db.execute("SELECT 1 FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ? AND i.category = '🔫 Оружие' AND i.name LIKE ? LIMIT 1", (m.chat.id, f"{m.text} | %"))
         if await res.fetchone():
             await state.set_state(Registration.selecting_weapon_type)
             await show_weapon_skins(m, state)
             return
 
-    # Если ничего не подошло
-    await m.answer("⚠️ Не понимаю команду или сессия истекла. Используй /items")
+    await m.answer("Выберите пункт меню 👇", reply_markup=get_main_menu_kb())
 
 # === ФОНОВАЯ ЗАДАЧА ===
 
 async def monitor_prices():
     while True:
         try:
-            logger.info("Starting price check cycle...")
             async with aiosqlite.connect("inventory.db") as db:
-                # Получаем все уникальные предметы для отслеживания, чтобы не ддосить стим одинаковыми запросами
-                # Но для простоты пройдемся по каждому user-item, т.к. у каждого своя "последняя цена" для уведомления? 
-                # Нет, лучше группировать. Но пока сделаем простой цикл по записям.
-                
                 cursor = await db.execute("SELECT id, chat_id, item_name, last_price FROM tracking")
                 tracks = await cursor.fetchall()
                 
                 for tid, chat_id, name, last_price in tracks:
-                    await asyncio.sleep(2) # Задержка 2 сек между запросами чтобы не получить бан
-                    
+                    await asyncio.sleep(2)
                     current_price, price_str = await get_steam_price(name)
                     if not current_price: continue
                     
-                    # Логика: если цена ВЫРОСЛА
                     if current_price > last_price:
-                        # Уведомляем
-                        msg = (f"📈 *Цена выросла!*\n"
-                               f"Предмет: `{name}`\n"
-                               f"Было: `{last_price} руб.` -> Стало: `{price_str}`")
+                        msg = f"📈 *Цена выросла!*\nПредмет: `{name}`\nБыло: `{last_price}` -> Стало: `{price_str}`"
                         try:
                             await bot_instance.send_message(chat_id, msg, parse_mode="Markdown")
-                            # Обновляем последнюю цену, чтобы не спамить
                             await db.execute("UPDATE tracking SET last_price = ? WHERE id = ?", (current_price, tid))
                             await db.commit()
-                        except Exception as e:
-                            logger.error(f"Failed to send alert to {chat_id}: {e}")
-                            
+                        except: pass
         except Exception as e:
-            logger.error(f"Monitor loop error: {e}")
-            
-        await asyncio.sleep(3600) # Ждем 1 час
+            logger.error(f"Monitor error: {e}")
+        await asyncio.sleep(3600)
 
 async def main():
     global bot_instance
     await init_db()
     bot = Bot(token=TOKEN)
     bot_instance = bot
-    
-    # Запуск фоновой задачи
     asyncio.create_task(monitor_prices())
-    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
