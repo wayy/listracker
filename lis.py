@@ -396,6 +396,36 @@ async def start_tracking(call: CallbackQuery):
         except:
             await call.answer("Вы уже отслеживаете этот предмет!", show_alert=True)
 
+# === ОБРАБОТЧИК НЕИЗВЕСТНЫХ СООБЩЕНИЙ (восстановление сессии) ===
+
+@dp.message()
+async def handle_unknown_state(m: Message, state: FSMContext):
+    # Обработка навигации
+    if m.text == "❌ Закрыть":
+        await m.answer("Меню закрыто.", reply_markup=ReplyKeyboardRemove())
+        return await state.clear()
+    if m.text == "🔙 Назад":
+        return await items_cmd(m, state)
+
+    async with aiosqlite.connect("inventory.db") as db:
+        # 1. Проверяем, является ли текст категорией
+        res = await db.execute("SELECT 1 FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ? AND i.category = ? LIMIT 1", (m.chat.id, m.text))
+        if await res.fetchone():
+            await state.set_state(Registration.selecting_category)
+            await show_cat(m, state)
+            return
+        
+        # 2. Проверяем, является ли текст типом оружия (AK-47 и т.д.)
+        # Ищем любой предмет, который начинается с "Текст |" в категории Оружие
+        res = await db.execute("SELECT 1 FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ? AND i.category = '🔫 Оружие' AND i.name LIKE ? LIMIT 1", (m.chat.id, f"{m.text} | %"))
+        if await res.fetchone():
+            await state.set_state(Registration.selecting_weapon_type)
+            await show_weapon_skins(m, state)
+            return
+
+    # Если ничего не подошло
+    await m.answer("⚠️ Не понимаю команду или сессия истекла. Используй /items")
+
 # === ФОНОВАЯ ЗАДАЧА ===
 
 async def monitor_prices():
