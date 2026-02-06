@@ -190,10 +190,8 @@ def get_items_inline_kb(items_data, page=0, prefix="item"):
     for item_id, name, amount in current_page_items:
         btn_text = f"{name} (x{amount})"
         if len(btn_text) > 40: btn_text = btn_text[:37] + "..."
-        # Для трекинга используем другой колбек если нужно, но пока используем универсальный view_
-        # Если это трекинг лист, там структура (id, name, last_price)
         if prefix == "tracklist":
-            btn_text = f"{name} (~{amount} руб)" # тут amount это last_price
+            btn_text = f"{name} (~{amount} руб)"
             if len(btn_text) > 40: btn_text = btn_text[:37] + "..."
             keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"trackview_{item_id}")])
         else:
@@ -210,24 +208,8 @@ def get_items_inline_kb(items_data, page=0, prefix="item"):
         
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# === ОБРАБОТЧИКИ START И МЕНЮ ===
-
-@dp.message(Command("start"))
-async def start(m: Message, state: FSMContext):
-    # Проверяем, зарегистрирован ли пользователь
-    async with aiosqlite.connect("inventory.db") as db:
-        res = await db.execute("SELECT steam_id FROM users WHERE chat_id = ?", (m.chat.id,))
-        user = await res.fetchone()
-        
-    if user:
-        await m.answer("🏠 Главное меню:", reply_markup=get_main_menu_kb())
-        await state.clear()
-    else:
-        await m.answer("👋 Привет! Пришли ссылку на Steam профиль для настройки.\n\nИнвентарь должен быть открыт!")
-        await state.set_state(Registration.waiting_for_steam_link)
-
-@dp.message(Registration.waiting_for_steam_link)
-async def process_link(m: Message, state: FSMContext):
+# === ОБЩАЯ ФУНКЦИЯ ОБНОВЛЕНИЯ ИНВЕНТАРЯ ===
+async def update_inventory_logic(m: Message, state: FSMContext):
     sid = await resolve_steam_id(m.text)
     if not sid: return await m.answer("❌ Неверная ссылка или ID, либо профиль не найден.")
     
@@ -249,9 +231,37 @@ async def process_link(m: Message, state: FSMContext):
         await db.commit()
 
     await wait.delete()
-    await m.answer(f"✅ Успех! Найдено предметов: `{len(items_counts)}`.\nДобро пожаловать в главное меню!", 
+    await m.answer(f"✅ Успех! Найдено предметов: `{len(items_counts)}`.\nДанные обновлены!", 
                    reply_markup=get_main_menu_kb(), parse_mode="Markdown")
     await state.clear()
+
+# === ОБРАБОТЧИКИ ===
+
+@dp.message(Command("start"))
+async def start(m: Message, state: FSMContext):
+    # Если пользователь есть в базе, просто показываем меню
+    # Но если у него пустой инвентарь (баг или сбой), лучше предложить обновить
+    async with aiosqlite.connect("inventory.db") as db:
+        res = await db.execute("SELECT steam_id FROM users WHERE chat_id = ?", (m.chat.id,))
+        user = await res.fetchone()
+        
+    if user:
+        await m.answer("🏠 Главное меню:", reply_markup=get_main_menu_kb())
+        await state.clear()
+    else:
+        await m.answer("👋 Привет! Пришли ссылку на Steam профиль для настройки.\n\nИнвентарь должен быть открыт!")
+        await state.set_state(Registration.waiting_for_steam_link)
+
+# Обработчик, если бот явно ждет ссылку (через стейт)
+@dp.message(Registration.waiting_for_steam_link)
+async def process_link(m: Message, state: FSMContext):
+    await update_inventory_logic(m, state)
+
+# ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ДЛЯ ССЫЛОК
+# Позволяет скинуть ссылку в любой момент для обновления инвентаря
+@dp.message(F.text.contains("steamcommunity.com"))
+async def global_link_update(m: Message, state: FSMContext):
+    await update_inventory_logic(m, state)
 
 # === ЛОГИКА ИНВЕНТАРЯ ===
 
@@ -260,7 +270,7 @@ async def open_inventory_menu(m: Message, state: FSMContext):
     async with aiosqlite.connect("inventory.db") as db:
         res = await db.execute("SELECT DISTINCT i.category FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ?", (m.chat.id,))
         cats = [r[0] for r in await res.fetchall()]
-        if not cats: return await m.answer("Инвентарь пуст или не загружен. Нажмите /start для обновления.")
+        if not cats: return await m.answer("Инвентарь пуст или не загружен. Отправьте ссылку на профиль Steam еще раз для обновления.")
         await m.answer("Выберите категорию:", reply_markup=get_categories_kb(cats))
         await state.set_state(Registration.selecting_category)
 
@@ -372,8 +382,6 @@ async def view_tracked_item(call: CallbackQuery):
         [InlineKeyboardButton(text="❌ Перестать отслеживать", callback_data=f"stoptrack_{track_id}")]
     ])
     
-    # Редактируем сообщение (или отправляем новое, если это был список)
-    # Лучше отправить новое, чтобы список остался выше
     await call.message.answer(text, parse_mode="Markdown", reply_markup=kb)
     await call.answer()
 
