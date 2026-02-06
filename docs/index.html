@@ -11,10 +11,33 @@
     <div id="user-name"></div>
     <div id="inventory-list">Загрузка предметов...</div>
 
-    <script>
-        const tg = window.Telegram.WebApp;
-        tg.ready();
-        document.getElementById('user-name').innerText = `Инвентарь: ${tg.initDataUnsafe.user.first_name}`;
-    </script>
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.ready();
+    tg.expand();
+
+    const userId = tg.initDataUnsafe?.user?.id;
+    // Сюда вставьте IP вашего сервера на Bothost
+    const BOT_IP = "ВАШ_IP_БОТХОСТА"; 
+
+    async function loadData() {
+        try {
+            const response = await fetch(`http://${BOT_IP}:8080/api/inventory?chat_id=${userId}`);
+            const items = await response.json();
+            
+            const list = document.getElementById('inventory');
+            list.innerHTML = items.map(item => `
+                <div class="item-card">
+                    <b>${item.name}</b><br>
+                    <span>Кол-во: ${item.amount}</span>
+                </div>
+            `).join('');
+        } catch (e) {
+            document.getElementById('inventory').innerText = "Ошибка загрузки данных";
+        }
+    }
+    loadData();
+</script>
+    
 </body>
 </html>
