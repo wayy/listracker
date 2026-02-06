@@ -56,8 +56,10 @@ def get_item_category(name: str) -> str:
 async def init_db():
     async with aiosqlite.connect("inventory.db") as db:
         await db.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY, steam_id TEXT)")
+        # Таблица предметов теперь хранит уникальные записи
         await db.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, category TEXT)")
-        await db.execute("CREATE TABLE IF NOT EXISTS user_items (chat_id INTEGER, item_id INTEGER, PRIMARY KEY (chat_id, item_id))")
+        # Таблица связей теперь позволяет хранить количество (amount)
+        await db.execute("CREATE TABLE IF NOT EXISTS user_items (chat_id INTEGER, item_id INTEGER, amount INTEGER, PRIMARY KEY (chat_id, item_id))")
         await db.commit()
 
 # Получение Steam ID
@@ -75,7 +77,7 @@ async def resolve_steam_id(text):
                 return res.group(1) if res else None
     return None
 
-# Загрузка инвентаря (без цен)
+# Загрузка инвентаря
 async def fetch_inventory(steam_id):
     url = f"https://steamcommunity.com/inventory/{steam_id}/{APP_ID}/2?l=russian&count=2000"
     async with aiohttp.ClientSession(headers=HEADERS) as s:
@@ -84,19 +86,29 @@ async def fetch_inventory(steam_id):
                 if r.status != 200: return None
                 data = await r.json()
                 if not data or "descriptions" not in data: return []
-                return [d["market_hash_name"] for d in data["descriptions"] if d.get("marketable")]
+                
+                # Считаем количество каждого предмета
+                all_items = [d["market_hash_name"] for d in data["descriptions"] if d.get("marketable")]
+                from collections import Counter
+                return Counter(all_items)
         except: return None
 
 dp = Dispatcher()
 
 def get_kb(categories):
-    btns = [[KeyboardButton(text=c)] for c in sorted(list(categories))]
+    categories = sorted(list(categories))
+    btns = []
+    for i in range(0, len(categories), 2):
+        row = [KeyboardButton(text=categories[i])]
+        if i + 1 < len(categories):
+            row.append(KeyboardButton(text=categories[i+1]))
+        btns.append(row)
     btns.append([KeyboardButton(text="❌ Закрыть")])
     return ReplyKeyboardMarkup(keyboard=btns, resize_keyboard=True)
 
 @dp.message(Command("start"))
 async def start(m: Message, state: FSMContext):
-    await m.answer("👋 Привет! Пришли ссылку на Steam профиль или 17-значный ID.\n\nИнвентарь должен быть открыт!")
+    await m.answer("👋 Привет! Пришли ссылку на Steam профиль.\n\nИнвентарь должен быть открыт!")
     await state.set_state(Registration.waiting_for_steam_link)
 
 @dp.message(Registration.waiting_for_steam_link)
@@ -105,27 +117,35 @@ async def process_link(m: Message, state: FSMContext):
     if not sid: return await m.answer("❌ Неверная ссылка или ID.")
     
     wait = await m.answer("⏳ Сканирую инвентарь...")
-    items = await fetch_inventory(sid)
+    items_counts = await fetch_inventory(sid) # Теперь это словарь {название: количество}
     
-    if items is None: return await wait.edit_text("❌ Ошибка доступа. Проверь настройки приватности Steam.")
-    if not items: return await wait.edit_text("📦 Инвентарь пуст.")
+    if items_counts is None: return await wait.edit_text("❌ Ошибка доступа. Проверь настройки приватности Steam.")
+    if not items_counts: return await wait.edit_text("📦 Инвентарь пуст.")
 
     async with aiosqlite.connect("inventory.db") as db:
         await db.execute("INSERT OR REPLACE INTO users VALUES (?,?)", (m.chat.id, sid))
         await db.execute("DELETE FROM user_items WHERE chat_id = ?", (m.chat.id,))
         
         cats = set()
-        for name in items:
+        for name, count in items_counts.items():
             cat = get_item_category(name)
             cats.add(cat)
+            # Добавляем в общий список предметов
             await db.execute("INSERT OR IGNORE INTO items (name, category) VALUES (?,?)", (name, cat))
+            
+            # Получаем ID предмета
             res = await db.execute("SELECT id FROM items WHERE name = ?", (name,))
-            row = await res.fetchone()
-            await db.execute("INSERT OR IGNORE INTO user_items VALUES (?,?)", (m.chat.id, row[0]))
+            item_id = (await res.fetchone())[0]
+            
+            # Привязываем к пользователю с указанием количества
+            await db.execute("INSERT INTO user_items (chat_id, item_id, amount) VALUES (?,?,?)", 
+                             (m.chat.id, item_id, count))
         await db.commit()
 
     await wait.delete()
-    await m.answer(f"✅ Успех! Найдено предметов: {len(items)}.\nВыбери категорию:", reply_markup=get_kb(cats))
+    await m.answer(f"✅ Успех! Найдено уникальных предметов: `{len(items_counts)}`.\nВыбери категорию для просмотра:", 
+                   reply_markup=get_kb(cats), 
+                   parse_mode="Markdown")
     await state.set_state(Registration.selecting_category)
 
 @dp.message(Command("items"))
@@ -140,25 +160,44 @@ async def items_cmd(m: Message, state: FSMContext):
 @dp.message(Registration.selecting_category)
 async def show_cat(m: Message, state: FSMContext):
     if m.text == "❌ Закрыть":
-        await m.answer("Меню закрыто", reply_markup=ReplyKeyboardRemove())
+        await m.answer("Меню закрыто. Используй /items для вызова.", reply_markup=ReplyKeyboardRemove())
         return await state.clear()
 
     async with aiosqlite.connect("inventory.db") as db:
-        res = await db.execute(
-            "SELECT i.name FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ? AND i.category = ?",
-            (m.chat.id, m.text)
-        )
+        # Запрос теперь достает имя и количество
+        query = """
+            SELECT i.name, ui.amount 
+            FROM items i 
+            JOIN user_items ui ON i.id = ui.item_id 
+            WHERE ui.chat_id = ? AND i.category = ?
+            ORDER BY ui.amount DESC
+        """
+        res = await db.execute(query, (m.chat.id, m.text))
         rows = await res.fetchall()
-        if not rows: return await m.answer("Ничего не найдено.")
         
-        text = f"📂 *{m.text}* ({len(rows)} шт.):\n\n" + "\n".join([f"• `{r[0]}`" for r in rows[:50]])
-        if len(rows) > 50: text += f"\n\n...и еще {len(rows)-50} предметов."
+        if not rows: 
+            return await m.answer("В этой категории ничего не найдено. Попробуй обновить инвентарь через /start")
+        
+        total_items = sum(r[1] for r in rows)
+        text = f"📂 *Категория:* {m.text}\n"
+        text += f"📦 *Всего предметов:* `{total_items}`\n\n"
+        
+        items_list = []
+        for name, amount in rows[:60]:
+            count_str = f" x{amount}" if amount > 1 else ""
+            items_list.append(f"• `{name}`{count_str}")
+        
+        text += "\n".join(items_list)
+        
+        if len(rows) > 60: 
+            text += f"\n\n...и еще {len(rows) - 60} типов предметов."
         
         await m.answer(text, parse_mode="Markdown")
 
 async def main():
     await init_db()
-    await dp.start_polling(Bot(token=TOKEN))
+    bot = Bot(token=TOKEN)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
