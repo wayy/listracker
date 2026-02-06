@@ -31,7 +31,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # Константы
-TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE") # Не забудь заменить или использовать .env
+TOKEN = os.getenv("BOT_TOKEN", "5070946103:AAFG8N40n9IPR3APhYxMeD-mB81-D7ss7Es") # Не забудь заменить или использовать .env
 APP_ID = 730  # CS2
 
 HEADERS = {
