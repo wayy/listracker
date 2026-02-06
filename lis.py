@@ -90,20 +90,30 @@ def parse_price(price_str):
 
 # Получение цены из Steam Market
 async def get_steam_price(item_name):
+    # Кодируем название для URL (пробелы -> %20, | -> %7C и т.д.)
     encoded_name = urllib.parse.quote(item_name)
     # currency=5 - это Рубли (RUB). 1 - USD.
     url = f"https://steamcommunity.com/market/priceoverview/?appid={APP_ID}&currency=5&market_hash_name={encoded_name}"
+    
     async with aiohttp.ClientSession(headers=HEADERS) as s:
         try:
             async with s.get(url, timeout=5) as r:
                 if r.status == 200:
                     data = await r.json()
-                    # Берем lowest_price (минимальная цена продажи сейчас)
+                    # Берем lowest_price (минимальная цена продажи сейчас) или медиану
                     price_str = data.get("lowest_price") or data.get("median_price")
-                    return parse_price(price_str), price_str # Возвращаем число и исходную строку
+                    if not price_str:
+                        return 0.0, "Нет лотов"
+                    return parse_price(price_str), price_str
+                elif r.status == 429:
+                    logger.warning(f"Steam Rate Limit (429) for {item_name}")
+                    return None, "Rate Limit (подождите)"
+                else:
+                    logger.error(f"Steam API Error {r.status} for {item_name}")
+                    return None, f"Ошибка Steam: {r.status}"
         except Exception as e:
             logger.error(f"Price fetch error for {item_name}: {e}")
-    return None, None
+            return None, "Ошибка сети"
 
 # Получение Steam ID
 async def resolve_steam_id(text):
@@ -341,13 +351,15 @@ async def view_item_details(call: CallbackQuery):
     text = f"📦 *Предмет:* `{name}`\n"
     if price_val:
         text += f"💰 *Цена:* `{price_str}`"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📈 Отслеживать", callback_data=f"track_{item_id}")]
+        ])
     else:
-        text += "💰 *Цена:* Не удалось получить или предмет не продается."
+        # Показываем причину ошибки, если она есть в price_str (наше сообщение об ошибке)
+        error_msg = price_str if price_str else "Не удалось получить или предмет не продается."
+        text += f"⚠️ *Ошибка:* {error_msg}\n\nПопробуйте через минуту."
+        kb = None
         
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📈 Отслеживать", callback_data=f"track_{item_id}")]
-    ])
-    
     await call.message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
 # Начало отслеживания
