@@ -39,7 +39,7 @@ from aiogram.fsm.state import State, StatesGroup
 TOKEN = os.getenv("BOT_TOKEN", "5070946103:AAFG8N40n9IPR3APhYxMeD-mB81-D7ss7Es")
 APP_ID = 730  # CS2
 
-# Путь к БД (оставляем os.getcwd() по требованию пользователя)
+# Путь к БД
 DB_PATH = os.path.join(os.getcwd(), "inventory.db")
 
 HEADERS = {
@@ -61,7 +61,6 @@ def get_item_category(name: str) -> str:
     if "|" in name: return "🔫 Оружие"
     return "🛠 Прочее"
 
-# Инициализация базы данных
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL") 
@@ -77,11 +76,9 @@ async def init_db():
                 UNIQUE(chat_id, item_name)
             )
         """)
-        # Таблица для маппинга контекста (чтобы callback_data был коротким)
         await db.execute("CREATE TABLE IF NOT EXISTS context_map (id INTEGER PRIMARY KEY AUTOINCREMENT, val TEXT UNIQUE)")
         await db.commit()
 
-# Хелперы для работы с короткими ID для callback_data
 async def get_ctx_id(val: str) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR IGNORE INTO context_map (val) VALUES (?)", (val,))
@@ -205,7 +202,6 @@ def get_weapon_types_kb(items):
     btns.append([KeyboardButton(text="🔙 К категориям")])
     return ReplyKeyboardMarkup(keyboard=btns, resize_keyboard=True)
 
-# Универсальный генератор инлайн кнопок (Stateless pagination via IDs)
 async def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
     ITEMS_PER_PAGE = 8
     start = page * ITEMS_PER_PAGE
@@ -222,13 +218,9 @@ async def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
         else:
             keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_{item_id}")])
     
-    # Кнопки навигации. Используем ID из context_map для экономии места.
     nav_row = []
     prefix = "pc" if mode == "cat" else "pw" if mode == "wep" else "pt"
-    
-    ctx_id = 0
-    if value:
-        ctx_id = await get_ctx_id(value)
+    ctx_id = await get_ctx_id(value) if value else 0
     
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}_{page-1}_{ctx_id}"))
@@ -369,17 +361,22 @@ async def send_paged_items(chat_id, category=None, weapon_type=None, page=0, mes
         rows = await res.fetchall()
 
     if not rows:
-        if not message_id: await bot_instance.send_message(chat_id, "Ничего не найдено.")
+        if message_id:
+            await bot_instance.edit_message_text("❌ Предметы не найдены.", chat_id, message_id)
+        else:
+            await bot_instance.send_message(chat_id, "❌ Предметы не найдены.")
         return
 
     kb = await get_items_inline_kb(rows, page, mode=mode, value=val)
     text = f"{title}\nСтраница {page+1}"
     
     if message_id:
-        try: await bot_instance.edit_message_text(text, chat_id, message_id, reply_markup=kb)
-        except: pass
+        try:
+            await bot_instance.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Edit error: {e}")
     else:
-        await bot_instance.send_message(chat_id, text, reply_markup=kb)
+        await bot_instance.send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
 
 # === ОТСЛЕЖИВАНИЕ ===
 
@@ -392,9 +389,9 @@ async def cmd_tracking(m: Message):
         
     if not rows: return await m.answer("Список отслеживания пуст.")
     kb = await get_items_inline_kb(rows, page=0, mode="trc")
-    await m.answer("📈 Ваши отслеживаемые предметы:", reply_markup=kb)
+    await m.answer("📈 Ваши отслеживаемые предметы:\nСтраница 1", reply_markup=kb)
 
-# === ГЛОБАЛЬНЫЙ ПАГИНАТОР (УЛЬТИМАТИВНЫЙ ЧЕРЕЗ IDs) ===
+# === ГЛОБАЛЬНЫЙ ПАГИНАТОР ===
 
 @dp.callback_query(F.data.startswith(("pc_", "pw_", "pt_")))
 async def handle_pagination(call: CallbackQuery):
@@ -404,28 +401,35 @@ async def handle_pagination(call: CallbackQuery):
         page = int(parts[1])
         ctx_id = int(parts[2]) if len(parts) > 2 else 0
 
-        # Восстанавливаем полное название из context_map по ID
         value = await get_ctx_val(ctx_id) if ctx_id > 0 else ""
 
-        if prefix == "pc": # Page Category
+        if prefix == "pc":
             await send_paged_items(call.message.chat.id, category=value, page=page, message_id=call.message.message_id)
-        elif prefix == "pw": # Page Weapon
+        elif prefix == "pw":
             await send_paged_items(call.message.chat.id, weapon_type=value, page=page, message_id=call.message.message_id)
-        elif prefix == "pt": # Page Tracking
+        elif prefix == "pt":
             async with aiosqlite.connect(DB_PATH) as db:
                 query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ?"
                 res = await db.execute(query, (call.message.chat.id,))
                 rows = await res.fetchall()
+            
+            if not rows:
+                return await call.answer("Список пуст.", show_alert=True)
+                
             kb = await get_items_inline_kb(rows, page=page, mode="trc")
-            await call.message.edit_reply_markup(reply_markup=kb)
+            # Для отслеживания тоже используем edit_message_text, чтобы обновить номер страницы
+            await bot_instance.edit_message_text(
+                f"📈 Ваши отслеживаемые предметы:\nСтраница {page+1}",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=kb
+            )
             
     except Exception as e:
         logger.error(f"Pagination error: {e}")
-        await call.answer("Ошибка переключения страницы", show_alert=True)
+        await call.answer("Ошибка обновления списка.", show_alert=True)
     finally:
         await call.answer()
-
-# === ПРОСМОТР И ОТСЛЕЖИВАНИЕ ===
 
 @dp.callback_query(F.data.startswith("view_"))
 async def handle_view_item(call: CallbackQuery):
@@ -461,7 +465,7 @@ async def handle_add_track(call: CallbackQuery):
             await call.message.edit_text(f"{call.message.text}\n\n✅ *Отслеживание запущено!*", parse_mode="Markdown")
         except: await call.answer("Вы уже отслеживаете этот предмет", show_alert=True)
 
-@dp.callback_query(F.data.startswith("trv_")) # Track View
+@dp.callback_query(F.data.startswith("trv_"))
 async def handle_track_view(call: CallbackQuery):
     track_id = int(call.data.split("_")[1])
     async with aiosqlite.connect(DB_PATH) as db:
