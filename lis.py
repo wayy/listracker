@@ -53,10 +53,9 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
-# Основной эндпоинт инвентаря
-INVENTORY_URL = "https://steamcommunity.com/inventory/{steam_id}/{app_id}/2?l=russian&count=5000"
-# Альтернативный (рыночный) эндпоинт
-MARKET_INVENTORY_URL = "https://steamcommunity.com/market/inventory/{steam_id}/{app_id}/2?l=russian"
+# Шаблоны URL (параметры добавляются динамически)
+INVENTORY_BASE_URL = "https://steamcommunity.com/inventory/{steam_id}/{app_id}/2?l=russian&count=1000"
+MARKET_BASE_URL = "https://steamcommunity.com/market/inventory/{steam_id}/{app_id}/2?l=russian"
 
 PRICE_URL = "https://steamcommunity.com/market/priceoverview/?appid={app_id}&currency={currency}&market_hash_name={name}"
 RESOLVE_ID_URL = "https://steamcommunity.com/id/{vanity_url}/?xml=1"
@@ -97,49 +96,76 @@ async def resolve_steam_id(text):
                 logger.error(f"Ошибка резолвинга Vanity URL: {e}")
     return None
 
-async def fetch_inventory(steam_id, app_id):
-    # Пробуем сначала основной метод
-    result = await _request_inventory(INVENTORY_URL.format(steam_id=steam_id, app_id=app_id))
+async def fetch_inventory(steam_id: str, app_id: int) -> list[str] | str | None:
+    """
+    Получает инвентарь с поддержкой пагинации и маппинга assets <-> descriptions.
+    """
+    all_items = []
+    start_assetid = None
     
-    # Если ошибка 400 или пустые данные, пробуем рыночный эндпоинт
-    if result is None or (isinstance(result, list) and len(result) == 0):
-        logger.info(f"Основной метод не сработал для {steam_id}, пробуем рыночный эндпоинт...")
-        result = await _request_inventory(MARKET_INVENTORY_URL.format(steam_id=steam_id, app_id=app_id))
+    # Попытка через основной инвентарный API
+    result = await _request_paginated_inventory(INVENTORY_BASE_URL, steam_id, app_id)
+    
+    # Fallback на рыночный API, если первый вернул ошибку или пусто
+    if result is None or (isinstance(result, list) and not result):
+        logger.info(f"Метод 1 не сработал для {steam_id}, пробуем рыночный эндпоинт...")
+        result = await _request_paginated_inventory(MARKET_BASE_URL, steam_id, app_id)
         
     return result
 
-async def _request_inventory(url):
+async def _request_paginated_inventory(base_url: str, steam_id: str, app_id: int):
+    items = []
+    start_assetid = None
+    
     async with aiohttp.ClientSession(headers=HEADERS) as session:
-        try:
-            async with session.get(url, timeout=25) as resp:
-                if resp.status == 403:
-                    return "PRIVATE"
-                if resp.status == 429:
-                    return "RATE_LIMIT"
-                if resp.status != 200:
-                    logger.error(f"Steam ответил статусом {resp.status} на URL: {url}")
-                    return None
-                
-                try:
+        while True:
+            url = base_url.format(steam_id=steam_id, app_id=app_id)
+            if start_assetid:
+                url += f"&start_assetid={start_assetid}"
+            
+            try:
+                async with session.get(url, timeout=25) as resp:
+                    if resp.status == 403:
+                        return "PRIVATE"
+                    if resp.status == 429:
+                        return "RATE_LIMIT"
+                    if resp.status != 200:
+                        logger.error(f"Steam API error {resp.status} on {url}")
+                        return None
+                    
                     data = await resp.json()
-                except Exception:
-                    return None
+            except Exception as e:
+                logger.error(f"Request exception: {e}")
+                return None
 
-                if not data or 'descriptions' not in data:
-                    if data and data.get('total_inventory_count') == 0:
-                        return []
-                    return None
-                
-                items = []
-                descriptions = data.get('descriptions', [])
-                for item in descriptions:
-                    if item.get('marketable') == 1 or item.get('marketable') is True:
-                        items.append(item['market_hash_name'])
-                
-                return list(set(items))
-        except Exception as e:
-            logger.error(f"Ошибка при запросе инвентаря: {e}")
-            return None
+            assets = data.get("assets", [])
+            descriptions = data.get("descriptions", [])
+
+            if not assets or not descriptions:
+                # Если ассетов нет, но это первая страница — инвентарь пуст.
+                # Если не первая — мы просто закончили сбор.
+                break
+
+            # Создаем карту описаний для быстрого поиска
+            desc_map = {
+                (d["classid"], d["instanceid"]): d 
+                for d in descriptions
+            }
+
+            for asset in assets:
+                key = (asset["classid"], asset["instanceid"])
+                desc = desc_map.get(key)
+                if desc and (desc.get("marketable") == 1 or desc.get("marketable") is True):
+                    items.append(desc["market_hash_name"])
+
+            # Проверка пагинации
+            if not data.get("more_items"):
+                break
+            
+            start_assetid = data.get("last_assetid")
+            await asyncio.sleep(1.2) # Небольшая пауза для обхода лимитов
+            
+    return list(set(items)) if items else []
 
 async def get_item_price(name, app_id):
     encoded_name = urllib.parse.quote(name)
@@ -250,7 +276,7 @@ async def process_link(message: Message, state: FSMContext):
         return await msg.edit_text("⚠️ Ошибка 429. Steam временно ограничил запросы. Попробуйте через 15 минут.")
     elif result is None:
         return await msg.edit_text("❌ Ошибка Steam (в т.ч. ошибка 400). Попробуйте еще раз позже.")
-    elif len(result) == 0:
+    elif isinstance(result, list) and len(result) == 0:
         return await msg.edit_text("⚠️ В инвентаре не найдено ликвидных предметов CS2.")
 
     async with aiosqlite.connect("inventory.db") as db:
