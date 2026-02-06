@@ -53,7 +53,7 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
-# Шаблоны URL (параметры добавляются динамически)
+# Шаблоны URL
 INVENTORY_BASE_URL = "https://steamcommunity.com/inventory/{steam_id}/{app_id}/2?l=russian&count=1000"
 MARKET_BASE_URL = "https://steamcommunity.com/market/inventory/{steam_id}/{app_id}/2?l=russian"
 
@@ -100,13 +100,10 @@ async def fetch_inventory(steam_id: str, app_id: int) -> list[str] | str | None:
     """
     Получает инвентарь с поддержкой пагинации и маппинга assets <-> descriptions.
     """
-    all_items = []
-    start_assetid = None
-    
     # Попытка через основной инвентарный API
     result = await _request_paginated_inventory(INVENTORY_BASE_URL, steam_id, app_id)
     
-    # Fallback на рыночный API, если первый вернул ошибку или пусто
+    # Fallback на рыночный API
     if result is None or (isinstance(result, list) and not result):
         logger.info(f"Метод 1 не сработал для {steam_id}, пробуем рыночный эндпоинт...")
         result = await _request_paginated_inventory(MARKET_BASE_URL, steam_id, app_id)
@@ -142,11 +139,8 @@ async def _request_paginated_inventory(base_url: str, steam_id: str, app_id: int
             descriptions = data.get("descriptions", [])
 
             if not assets or not descriptions:
-                # Если ассетов нет, но это первая страница — инвентарь пуст.
-                # Если не первая — мы просто закончили сбор.
                 break
 
-            # Создаем карту описаний для быстрого поиска
             desc_map = {
                 (d["classid"], d["instanceid"]): d 
                 for d in descriptions
@@ -158,21 +152,20 @@ async def _request_paginated_inventory(base_url: str, steam_id: str, app_id: int
                 if desc and (desc.get("marketable") == 1 or desc.get("marketable") is True):
                     items.append(desc["market_hash_name"])
 
-            # Проверка пагинации
             if not data.get("more_items"):
                 break
             
             start_assetid = data.get("last_assetid")
-            await asyncio.sleep(1.2) # Небольшая пауза для обхода лимитов
+            await asyncio.sleep(1.2)
             
-    return list(set(items)) if items else []
+    return items if items else []
 
 async def get_item_price(name, app_id):
     encoded_name = urllib.parse.quote(name)
     url = PRICE_URL.format(app_id=app_id, currency=CURRENCY, name=encoded_name)
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         try:
-            async with session.get(url) as resp:
+            async with session.get(url, timeout=15) as resp:
                 if resp.status != 200:
                     return None
                 data = await resp.json()
@@ -256,8 +249,9 @@ async def cmd_items(message: Message):
         if not rows:
             return await message.answer("Список предметов пуст. Сначала привяжите профиль через /start")
         
-        text = "📦 *Ваши предметы в базе:*\n\n" + "\n".join([f"• `{r[0]}`" for r in rows[:40]])
-        if len(rows) > 40: text += "\n\n...и другие."
+        count = len(rows)
+        text = f"📦 *Ваши предметы в базе ({count}):*\n\n" + "\n".join([f"• `{r[0]}`" for r in rows[:40]])
+        if count > 40: text += f"\n\n...и еще {count - 40} предметов."
         await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Registration.waiting_for_steam_link)
@@ -275,17 +269,31 @@ async def process_link(message: Message, state: FSMContext):
     elif result == "RATE_LIMIT":
         return await msg.edit_text("⚠️ Ошибка 429. Steam временно ограничил запросы. Попробуйте через 15 минут.")
     elif result is None:
-        return await msg.edit_text("❌ Ошибка Steam (в т.ч. ошибка 400). Попробуйте еще раз позже.")
+        return await msg.edit_text("❌ Ошибка Steam. API может быть временно недоступен.")
     elif isinstance(result, list) and len(result) == 0:
         return await msg.edit_text("⚠️ В инвентаре не найдено ликвидных предметов CS2.")
 
+    # СРАЗУ сохраняем всё в базу данных, чтобы /items работал мгновенно
     async with aiosqlite.connect("inventory.db") as db:
+        # Сохраняем пользователя
         await db.execute("INSERT OR REPLACE INTO users (chat_id, steam_id) VALUES (?, ?)", (message.chat.id, steam_id))
+        # Очищаем старые связи
         await db.execute("DELETE FROM user_items WHERE chat_id = ?", (message.chat.id,))
+        
+        # Инъекция всех найденных предметов в таблицу предметов и связей
+        for item_name in result:
+            await db.execute("INSERT OR IGNORE INTO items (market_hash_name, appid) VALUES (?, ?)", (item_name, APP_ID))
+            # Получаем ID предмета (существующий или новый)
+            res = await db.execute("SELECT id FROM items WHERE market_hash_name = ?", (item_name,))
+            row = await res.fetchone()
+            if row:
+                item_id = row[0]
+                await db.execute("INSERT OR IGNORE INTO user_items (chat_id, item_id) VALUES (?, ?)", (message.chat.id, item_id))
+        
         await db.commit()
     
     await state.clear()
-    await msg.edit_text(f"✅ Успех! Найдено предметов: {len(result)}.\nИспользуйте /items для списка.")
+    await msg.edit_text(f"✅ Успех! Найдено и сохранено предметов: {len(result)}.\nИспользуйте /items для списка.")
 
 async def main():
     await init_db()
