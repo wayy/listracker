@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body { color: white; background: #1a1a1a; font-family: sans-serif; }
+        .item-card { border: 1px solid #333; padding: 10px; margin: 5px; border-radius: 8px; }
+    </style>
+</head>
+<body>
+    <div id="user-name"></div>
+    <div id="inventory-list">Загрузка предметов...</div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        document.getElementById('user-name').innerText = `Инвентарь: ${tg.initDataUnsafe.user.first_name}`;
+    </script>
+</body>
+</html>
