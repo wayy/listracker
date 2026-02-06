@@ -188,6 +188,16 @@ def get_weapon_types_kb(items):
     btns.append([KeyboardButton(text="🔙 К категориям")])
     return ReplyKeyboardMarkup(keyboard=btns, resize_keyboard=True)
 
+# Функция байт-безопасного обрезания строки для callback_data
+def truncate_callback_value(val: str, max_bytes: int = 32) -> str:
+    if not val:
+        return ""
+    encoded = val.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return val
+    # Декодируем обратно с игнорированием битых символов на конце
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
 # Оптимизированный генератор инлайн кнопок (Stateless pagination)
 def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
     ITEMS_PER_PAGE = 8
@@ -211,8 +221,8 @@ def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
     nav_row = []
     prefix = "pc" if mode == "cat" else "pw" if mode == "wep" else "pt"
     
-    # Сокращаем value, если оно слишком длинное для callback_data (64 байта лимит)
-    short_val = value[:20] if value else ""
+    # Байт-безопасное обрезание для соблюдения лимита 64 байт в callback_data
+    short_val = truncate_callback_value(value, 32)
     
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}_{page-1}_{short_val}"))
