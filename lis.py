@@ -28,7 +28,7 @@ import aiohttp
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -44,7 +44,6 @@ APP_ID = int(os.getenv("APP_ID", 730))
 CURRENCY = int(os.getenv("CURRENCY", 5)) # 5 = RUB
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 86400)) 
 
-# Средняя задержка между запросами цен (в секундах) для расчета времени
 AVG_PRICE_DELAY = 13 
 
 HEADERS = {
@@ -62,14 +61,34 @@ RESOLVE_ID_URL = "https://steamcommunity.com/id/{vanity_url}/?xml=1"
 
 class Registration(StatesGroup):
     waiting_for_steam_link = State()
+    selecting_category = State()
+
+def get_item_category(name: str) -> str:
+    name_lower = name.lower()
+    if any(x in name_lower for x in ["case", "кейс", "пакет", "набор"]):
+        return "📦 Кейсы"
+    if "sticker |" in name_lower or "наклейка |" in name_lower:
+        return "🎯 Наклейки"
+    if any(x in name_lower for x in ["agent", "агент", "sir ", "professional"]):
+        return "👤 Агенты"
+    if any(x in name_lower for x in ["music kit", "набор музыки"]):
+        return "🎵 Музыка"
+    if any(x in name_lower for x in ["graffiti", "граффити"]):
+        return "🎨 Граффити"
+    if any(x in name_lower for x in ["patch", "нашивка"]):
+        return "🧵 Нашивки"
+    if any(x in name_lower for x in ["medal", "медаль", "coin", "монета"]):
+        return "🏅 Медали"
+    if "|" in name:
+        return "🔫 Оружие"
+    return "🛠 Прочее"
 
 async def init_db():
     async with aiosqlite.connect("inventory.db") as db:
         await db.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY, steam_id TEXT NOT NULL)")
-        await db.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, market_hash_name TEXT UNIQUE, appid INTEGER)")
+        await db.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, market_hash_name TEXT UNIQUE, appid INTEGER, category TEXT)")
         await db.execute("CREATE TABLE IF NOT EXISTS user_items (chat_id INTEGER, item_id INTEGER, PRIMARY KEY (chat_id, item_id))")
         await db.execute("CREATE TABLE IF NOT EXISTS prices (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER, lowest_price REAL, timestamp DATETIME)")
-        await db.execute("CREATE TABLE IF NOT EXISTS alerts_state (chat_id INTEGER, item_id INTEGER, last_notified_price REAL, PRIMARY KEY (chat_id, item_id))")
         await db.commit()
 
 async def resolve_steam_id(text):
@@ -158,32 +177,14 @@ async def price_checker_loop(bot: Bot):
                 
                 for item_id, name in items_to_update:
                     current_price = await get_item_price(name, APP_ID)
-                    
                     if current_price == "RATE_LIMIT":
                         await asyncio.sleep(60)
                         break 
                     
                     if current_price and isinstance(current_price, float):
-                        res = await db.execute("SELECT lowest_price FROM prices WHERE item_id = ? ORDER BY timestamp DESC LIMIT 1", (item_id,))
-                        last_price_row = await res.fetchone()
-                        
                         await db.execute("INSERT INTO prices (item_id, lowest_price, timestamp) VALUES (?, ?, ?)", 
                                        (item_id, current_price, datetime.now()))
                         await db.commit()
-
-                        if last_price_row and current_price > last_price_row[0]:
-                            diff = current_price - last_price_row[0]
-                            async with db.execute("SELECT chat_id FROM user_items WHERE item_id = ?", (item_id,)) as u_cursor:
-                                user_chats = await u_cursor.fetchall()
-                                for (chat_id,) in user_chats:
-                                    try:
-                                        await bot.send_message(
-                                            chat_id, 
-                                            f"📈 *Цена выросла!*\n\n📦 `{name}`\n💰 {last_price_row[0]:.2f} -> {current_price:.2f} ₽\n➕ Разница: +{diff:.2f} ₽",
-                                            parse_mode="Markdown"
-                                        )
-                                    except Exception: pass
-                        
                         await asyncio.sleep(AVG_PRICE_DELAY)
                     else:
                         await asyncio.sleep(5)
@@ -192,6 +193,20 @@ async def price_checker_loop(bot: Bot):
         await asyncio.sleep(30)
 
 dp = Dispatcher()
+
+def build_category_keyboard(categories_list):
+    """Вспомогательная функция для сборки красивой клавиатуры"""
+    buttons = []
+    # Сортируем и группируем по 2 в ряд
+    sorted_cats = sorted(list(categories_list))
+    for i in range(0, len(sorted_cats), 2):
+        row = [KeyboardButton(text=sorted_cats[i])]
+        if i + 1 < len(sorted_cats):
+            row.append(KeyboardButton(text=sorted_cats[i+1]))
+        buttons.append(row)
+    
+    buttons.append([KeyboardButton(text="📊 Показать всё")])
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
@@ -203,45 +218,80 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.set_state(Registration.waiting_for_steam_link)
 
 @dp.message(Command("items"))
-async def cmd_items(message: Message):
+async def cmd_items_menu(message: Message, state: FSMContext):
     async with aiosqlite.connect("inventory.db") as db:
         res = await db.execute(
-            """
-            SELECT i.market_hash_name, 
-            (SELECT p.lowest_price FROM prices p WHERE p.item_id = i.id ORDER BY p.timestamp DESC LIMIT 1) as price
-            FROM items i
-            JOIN user_items ui ON i.id = ui.item_id
-            WHERE ui.chat_id = ?
-            """, (message.chat.id,)
+            "SELECT DISTINCT i.category FROM items i "
+            "JOIN user_items ui ON i.id = ui.item_id "
+            "WHERE ui.chat_id = ?", (message.chat.id,)
         )
-        rows = await res.fetchall()
-        if not rows:
-            return await message.answer("Список предметов пуст. Сначала привяжите профиль через /start")
+        categories = [c[0] for c in await res.fetchall()]
         
+        if not categories:
+            return await message.answer("Инвентарь пуст. Используйте /start для привязки.")
+            
+        markup = build_category_keyboard(categories)
+        await message.answer("Выберите категорию предметов для просмотра:", reply_markup=markup)
+        await state.set_state(Registration.selecting_category)
+
+@dp.message(Registration.selecting_category)
+async def show_category_items(message: Message, state: FSMContext):
+    category = message.text
+    chat_id = message.chat.id
+    
+    async with aiosqlite.connect("inventory.db") as db:
+        if category == "📊 Показать всё":
+            query = """
+                SELECT i.market_hash_name, 
+                (SELECT p.lowest_price FROM prices p WHERE p.item_id = i.id ORDER BY p.timestamp DESC LIMIT 1) as price,
+                i.category
+                FROM items i
+                JOIN user_items ui ON i.id = ui.item_id
+                WHERE ui.chat_id = ?
+            """
+            params = (chat_id,)
+        else:
+            query = """
+                SELECT i.market_hash_name, 
+                (SELECT p.lowest_price FROM prices p WHERE p.item_id = i.id ORDER BY p.timestamp DESC LIMIT 1) as price,
+                i.category
+                FROM items i
+                JOIN user_items ui ON i.id = ui.item_id
+                WHERE ui.chat_id = ? AND i.category = ?
+            """
+            params = (chat_id, category)
+
+        res = await db.execute(query, params)
+        rows = await res.fetchall()
+        
+        if not rows:
+            return await message.answer("В этой категории ничего не найдено.", reply_markup=ReplyKeyboardRemove())
+
         count = len(rows)
         items_with_price = [r for r in rows if r[1] is not None]
         total_sum = sum([r[1] for r in items_with_price])
         priced_count = len(items_with_price)
         
-        text = f"📦 *Ваши предметы ({count}):*\n"
-        text += f"💰 *Оцененная стоимость:* `{total_sum:.2f} ₽` ({priced_count}/{count})\n\n"
+        text = f"📂 *Категория:* {category}\n"
+        text += f"📦 *Предметов:* `{count}`\n"
+        text += f"💰 *Сумма:* `{total_sum:.2f} ₽` ({priced_count}/{count})\n\n"
         
         if priced_count < count:
             remaining = count - priced_count
-            # Расчет оставшегося времени
             seconds = remaining * AVG_PRICE_DELAY
             time_str = str(timedelta(seconds=seconds)).split('.')[0]
-            text += f"⏳ *Ожидание загрузки цен:* ~`{time_str}`\n\n"
+            text += f"⏳ *Ожидание цен:* ~`{time_str}`\n\n"
 
         items_list = []
-        for r in rows[:35]:
-            p_text = f"{r[1]:.2f} ₽" if r[1] else "⏳ _загрузка..._"
+        for r in rows[:40]:
+            p_text = f"{r[1]:.2f} ₽" if r[1] else "⏳"
             items_list.append(f"• `{r[0]}` — {p_text}")
             
         text += "\n".join(items_list)
-        if count > 35: text += f"\n\n...и еще {count - 35} предметов."
+        if count > 40: text += f"\n\n...и еще {count - 40} предметов."
         
-        await message.answer(text, parse_mode="Markdown")
+        await message.answer(text, parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+        await state.clear()
 
 @dp.message(Registration.waiting_for_steam_link)
 async def process_link(message: Message, state: FSMContext):
@@ -255,31 +305,37 @@ async def process_link(message: Message, state: FSMContext):
     elif result == "RATE_LIMIT": return await msg.edit_text("⚠️ Ошибка 429 (Steam Limit). Подождите немного.")
     elif not result: return await msg.edit_text("⚠️ Предметы не найдены.")
 
-    total_items = len(result)
-    seconds = total_items * AVG_PRICE_DELAY
-    time_str = str(timedelta(seconds=seconds)).split('.')[0]
-
-    await msg.edit_text(f"✅ Найдено предметов: {total_items}.\nДобавляю в очередь на оценку.")
-
+    found_categories = set()
     async with aiosqlite.connect("inventory.db") as db:
         await db.execute("INSERT OR REPLACE INTO users (chat_id, steam_id) VALUES (?, ?)", (message.chat.id, steam_id))
         await db.execute("DELETE FROM user_items WHERE chat_id = ?", (message.chat.id,))
+        
         for item_name in result:
-            await db.execute("INSERT OR IGNORE INTO items (market_hash_name, appid) VALUES (?, ?)", (item_name, APP_ID))
+            category = get_item_category(item_name)
+            found_categories.add(category)
+            
+            await db.execute(
+                "INSERT INTO items (market_hash_name, appid, category) VALUES (?, ?, ?) "
+                "ON CONFLICT(market_hash_name) DO UPDATE SET category=excluded.category", 
+                (item_name, APP_ID, category)
+            )
+            
             res = await db.execute("SELECT id FROM items WHERE market_hash_name = ?", (item_name,))
             row = await res.fetchone()
             if row:
                 await db.execute("INSERT OR IGNORE INTO user_items (chat_id, item_id) VALUES (?, ?)", (message.chat.id, row[0]))
         await db.commit()
     
-    await state.clear()
-    await msg.edit_text(
-        f"📊 *Инвентарь успешно привязан!*\n\n"
-        f"Всего предметов: `{total_items}`.\n"
-        f"Приблизительное время полной оценки: ~`{time_str}`.\n\n"
-        f"Бот загружает цены в фоновом режиме по 1 предмету каждые 13 секунд (лимит Steam).\n"
-        f"Следите за прогрессом через /items."
-    , parse_mode="Markdown")
+    markup = build_category_keyboard(found_categories)
+
+    await msg.delete()
+    await message.answer(
+        f"✅ Инвентарь просканирован! Найдено предметов: `{len(result)}`.\n\n"
+        f"Выберите категорию для просмотра списка:",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    await state.set_state(Registration.selecting_category)
 
 async def main():
     await init_db()
