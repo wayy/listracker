@@ -11,7 +11,7 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         :root {
-            --bg: #0f1015;
+            --bg: #0d0e12;
             --card: #1c1e26;
             --accent: #4b89ff;
             --text: #ffffff;
@@ -21,12 +21,22 @@
         body {
             background: var(--bg);
             color: var(--text);
-            font-family: -apple-system, sans-serif;
+            font-family: -apple-system, system-ui, sans-serif;
             margin: 0;
             padding: 15px;
         }
-        .header { margin-bottom: 20px; font-weight: 800; font-size: 1.3em; border-bottom: 1px solid #333; padding-bottom: 10px; }
-        .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+        .header { 
+            margin-bottom: 20px; 
+            font-weight: 800; 
+            font-size: 1.3em; 
+            border-bottom: 1px solid #333; 
+            padding-bottom: 10px; 
+        }
+        .grid { 
+            display: grid; 
+            grid-template-columns: repeat(2, 1fr); 
+            gap: 12px; 
+        }
         .item {
             background: var(--card);
             border: 1px solid #2d313d;
@@ -39,15 +49,34 @@
             justify-content: space-between;
             border-bottom: 3px solid var(--rarity-rare);
         }
-        .item-name { font-weight: 500; margin-bottom: 5px; }
-        .item-count { color: var(--accent); font-weight: bold; }
-        .loader { text-align: center; padding-top: 100px; color: var(--text-dim); }
+        .item-name { 
+            font-weight: 500; 
+            margin-bottom: 5px; 
+            line-height: 1.3; 
+        }
+        .item-count { 
+            color: var(--accent); 
+            font-weight: bold; 
+        }
+        .loader { 
+            text-align: center; 
+            padding-top: 100px; 
+            color: var(--text-dim); 
+        }
+        .error { 
+            color: #eb4b4b; 
+            background: rgba(235,75,75,0.1); 
+            padding: 15px; 
+            border-radius: 10px; 
+            text-align: center; 
+            margin-top: 20px; 
+        }
     </style>
 </head>
 <body>
-    <div class="header" id="title">Инвентарь (Облако)</div>
+    <div class="header" id="title">Инвентарь</div>
     <div id="app">
-        <div class="loader">Синхронизация с облаком...</div>
+        <div class="loader">Синхронизация...</div>
     </div>
 
     <script>
@@ -55,59 +84,80 @@
         tg.ready();
         tg.expand();
 
-        // Конфигурация Firebase (заполняется автоматически средой)
-        const firebaseConfig = JSON.parse('{}'); // Здесь будет ваша конфигурация
-        const appId = 'cs2-tracker-default';
-
-        firebase.initializeApp(firebaseConfig);
-        const db = firebase.firestore();
-
-        async function loadCloudData() {
-            const app = document.getElementById('app');
-            
-            // Получаем user_id из URL параметров
-            const urlParams = new URLSearchParams(window.location.search);
-            const userId = urlParams.get('user_id') || tg.initDataUnsafe.user?.id;
-
-            if (!userId) {
-                app.innerHTML = '<div class="loader">Ошибка: User ID не найден. Откройте через бота.</div>';
-                return;
+        // Безопасное получение конфига из среды
+        let firebaseConfig = {};
+        try {
+            // В среде выполнения переменные __firebase_config и __app_id 
+            // предоставляются платформой автоматически.
+            if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+                firebaseConfig = JSON.parse(__firebase_config);
             }
+        } catch (e) {
+            console.error("Ошибка парсинга конфига Firebase", e);
+        }
 
-            try {
-                // Авторизуемся анонимно для доступа к Firestore
-                await firebase.auth().signInAnonymously();
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'cs2-tracker-app';
 
-                // Читаем документ: /artifacts/{appId}/public/data/inventories/{userId}
-                const docRef = db.collection('artifacts').document(appId)
-                                 .collection('public').document('data')
-                                 .collection('inventories').document(userId.toString());
-                
-                const doc = await docRef.get();
+        if (Object.keys(firebaseConfig).length > 0) {
+            firebase.initializeApp(firebaseConfig);
+            const db = firebase.firestore();
 
-                if (!doc.exists) {
-                    app.innerHTML = '<div class="loader">Данные в облаке еще не готовы. Нажмите кнопку в боте еще раз.</div>';
+            async function loadCloudData() {
+                const app = document.getElementById('app');
+                const urlParams = new URLSearchParams(window.location.search);
+                const userId = urlParams.get('user_id') || tg.initDataUnsafe.user?.id;
+
+                if (!userId) {
+                    app.innerHTML = '<div class="error">Ошибка: ID пользователя не найден. Откройте приложение через бота.</div>';
                     return;
                 }
 
-                const items = doc.data().items;
-                
-                app.innerHTML = `<div class="grid">` + items.map(item => `
-                    <div class="item">
-                        <div class="item-name">${item[0]}</div>
-                        <div class="item-footer">
-                            <span class="item-count">x${item[1]}</span>
+                try {
+                    // Авторизация согласно правилам платформы
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await firebase.auth().signInWithCustomToken(__initial_auth_token);
+                    } else {
+                        await firebase.auth().signInAnonymously();
+                    }
+
+                    // Чтение данных из пути: /artifacts/{appId}/public/data/inventories/{userId}
+                    const docRef = db.collection('artifacts').doc(appId)
+                                     .collection('public').doc('data')
+                                     .collection('inventories').doc(userId.toString());
+                    
+                    const doc = await docRef.get();
+
+                    if (!doc.exists) {
+                        app.innerHTML = '<div class="error">Данные в облаке не найдены. Нажмите кнопку в боте еще раз для синхронизации.</div>';
+                        return;
+                    }
+
+                    const items = doc.data().items || [];
+                    
+                    if (items.length === 0) {
+                        app.innerHTML = '<div class="loader">Ваш инвентарь пуст.</div>';
+                        return;
+                    }
+
+                    app.innerHTML = `<div class="grid">` + items.map(item => `
+                        <div class="item">
+                            <div class="item-name">${item[0]}</div>
+                            <div class="item-footer">
+                                <span class="item-count">x${item[1]}</span>
+                            </div>
                         </div>
-                    </div>
-                `).join('') + `</div>`;
+                    `).join('') + `</div>`;
 
-            } catch (e) {
-                console.error(e);
-                app.innerHTML = '<div class="loader">Ошибка облака: ' + e.message + '</div>';
+                } catch (e) {
+                    console.error("Cloud Error:", e);
+                    app.innerHTML = '<div class="error">Ошибка облачного хранилища: ' + e.message + '</div>';
+                }
             }
-        }
 
-        loadCloudData();
+            loadCloudData();
+        } else {
+            document.getElementById('app').innerHTML = '<div class="error">Конфигурация Firebase не найдена. Убедитесь, что настройки проекта указаны верно.</div>';
+        }
     </script>
 </body>
 </html>
