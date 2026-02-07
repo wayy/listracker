@@ -10,12 +10,13 @@ import base64
 from collections import Counter
 from datetime import datetime
 
-# Авто-установка зависимостей
+# Автоматическая установка необходимых пакетов
 def install_missing_packages():
-    packages = ["aiosqlite", "aiogram", "aiohttp", "python-dotenv"]
+    # Добавлены firebase-admin для облака и python-dotenv для секретов
+    packages = ["aiosqlite", "aiogram", "aiohttp", "python-dotenv", "firebase-admin"]
     for package in packages:
         try:
-            module_name = "dotenv" if package == "python-dotenv" else package
+            module_name = "firebase_admin" if package == "firebase-admin" else ("dotenv" if package == "python-dotenv" else package)
             __import__(module_name)
         except ImportError:
             subprocess.check_call([sys.executable, "-m", "pip", "install", package])
@@ -24,6 +25,8 @@ install_missing_packages()
 
 import aiohttp
 import aiosqlite
+import firebase_admin
+from firebase_admin import credentials, firestore
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
@@ -33,7 +36,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-# Константы
+# --- КОНФИГУРАЦИЯ ---
 TOKEN = os.getenv("BOT_TOKEN", "5070946103:AAFG8N40n9IPR3APhYxMeD-mB81-D7ss7Es")
 APP_ID = 730  # CS2
 DB_PATH = os.path.join(os.getcwd(), "inventory.db")
@@ -47,12 +50,31 @@ HEADERS = {
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# --- ИНИЦИАЛИЗАЦИЯ FIREBASE ---
+# ВНИМАНИЕ: Положите serviceAccountKey.json в папку с ботом на Bothost!
+db_cloud = None
+cloud_app_id = "cs2-tracker-app" # ID вашего приложения в облаке
+
+try:
+    if not firebase_admin._apps:
+        cred_path = os.path.join(os.getcwd(), "serviceAccountKey.json")
+        if os.path.exists(cred_path):
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred)
+            db_cloud = firestore.client()
+            logger.info("Firebase успешно инициализирован.")
+        else:
+            logger.warning("serviceAccountKey.json не найден. Mini App может не работать.")
+except Exception as e:
+    logger.error(f"Ошибка инициализации Firebase: {e}")
+
+# --- СОСТОЯНИЯ ---
 class Registration(StatesGroup):
     waiting_for_steam_link = State()
     selecting_category = State()
     selecting_weapon_type = State()
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def get_item_category(name: str) -> str:
     n = name.lower()
@@ -97,8 +119,11 @@ async def get_ctx_val(ctx_id: int) -> str:
         row = await res.fetchone()
         return row[0] if row else None
 
-async def get_inventory_data_link(chat_id):
-    """Подготовка максимально сжатой ссылки для Mini App"""
+# --- СИНХРОНИЗАЦИЯ С ОБЛАКОМ ---
+
+async def sync_inventory_to_cloud(chat_id):
+    """Отправка инвентаря в Firestore для Mini App"""
+    if not db_cloud: return False
     async with aiosqlite.connect(DB_PATH) as db:
         query = """
             SELECT i.name, ui.amount, i.category 
@@ -107,17 +132,26 @@ async def get_inventory_data_link(chat_id):
         """
         async with db.execute(query, (chat_id,)) as cursor:
             rows = await cursor.fetchall()
-            if not rows: return None
+            if not rows: return False
             
-            # Используем список списков [имя, кол-во, категория] для экономии места в URL
+            # Компактный формат [[name, amount, category]]
             data = [[r[0], r[1], r[2]] for r in rows]
-            json_str = json.dumps(data, ensure_ascii=False)
             
-            # Кодируем в base64
-            encoded = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
-            return f"{WEB_APP_URL}#data={encoded}"
+            try:
+                # Путь по правилам среды: /artifacts/{appId}/public/data/inventories/{userId}
+                doc_ref = db_cloud.collection('artifacts').document(cloud_app_id)\
+                                  .collection('public').document('data')\
+                                  .collection('inventories').document(str(chat_id))
+                doc_ref.set({
+                    'items': data,
+                    'updatedAt': firestore.SERVER_TIMESTAMP
+                })
+                return True
+            except Exception as e:
+                logger.error(f"Cloud sync error: {e}")
+                return False
 
-# --- ПАРСИНГ STEAM ---
+# --- ПАРСИНГ STEAM И ЦЕН ---
 
 def parse_price(price_str):
     if not price_str: return 0.0
@@ -296,7 +330,7 @@ async def cmd_start(m: Message, state: FSMContext):
         await m.answer("🏠 Главное меню:", reply_markup=get_main_menu_kb())
         await state.clear()
     else:
-        await m.answer("👋 Привет! Пришли ссылку на Steam профиль.", reply_markup=ReplyKeyboardRemove())
+        await m.answer("👋 Привет! Пришли ссылку на Steam профиль (инвентарь должен быть открыт).", reply_markup=ReplyKeyboardRemove())
         await state.set_state(Registration.waiting_for_steam_link)
 
 @dp.message(Registration.waiting_for_steam_link)
@@ -324,16 +358,18 @@ async def open_inventory(m: Message, state: FSMContext):
         await state.set_state(Registration.selecting_category)
 
 @dp.message(F.text == "📱 Mini App")
-async def show_mini_app_choice(m: Message):
-    link = await get_inventory_data_link(m.chat.id)
-    if not link:
-        return await m.answer("❌ Инвентарь пуст. Сначала привяжи профиль Steam.")
+async def open_mini_app(m: Message):
+    wait = await m.answer("⏳ Синхронизация с облаком...")
+    success = await sync_inventory_to_cloud(m.chat.id)
+    if not success:
+        return await wait.edit_text("❌ Ошибка синхронизации. Проверьте serviceAccountKey.json.")
     
-    # Отправляем сообщение с инлайн-кнопкой, в которой зашита уникальная ссылка с данными
+    link = f"{WEB_APP_URL}?user_id={m.chat.id}"
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Открыть визуальный инвентарь 🚀", web_app=WebAppInfo(url=link))
+        InlineKeyboardButton(text="Открыть инвентарь 🚀", web_app=WebAppInfo(url=link))
     ]])
-    await m.answer("Нажми кнопку ниже для перехода в Mini App (актуально для вашего текущего инвентаря):", reply_markup=kb)
+    await wait.delete()
+    await m.answer("Ваш инвентарь готов для Mini App:", reply_markup=kb)
 
 @dp.message(F.text == "🔫 Оружие")
 async def show_weapon_shortcut(m: Message, state: FSMContext):
