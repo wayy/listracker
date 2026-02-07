@@ -115,14 +115,11 @@
             line-height: 1.6;
         }
 
-        .btn-refresh {
-            background: var(--accent);
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 8px;
-            margin-top: 15px;
-            font-weight: bold;
+        .debug-info {
+            font-size: 10px;
+            color: #444;
+            margin-top: 20px;
+            word-break: break-all;
         }
     </style>
 </head>
@@ -149,10 +146,15 @@
         // Безопасное декодирование UTF-8 из Base64
         function b64DecodeUnicode(str) {
             try {
-                return decodeURIComponent(Array.prototype.map.call(atob(str), function(c) {
-                    return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
-                }).join(''));
+                // Используем замену для корректной работы с разными форматами Base64
+                const binary = atob(str.replace(/-/g, '+').replace(/_/g, '/'));
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) {
+                    bytes[i] = binary.charCodeAt(i);
+                }
+                return new TextDecoder().decode(bytes);
             } catch (e) {
+                console.error("Base64 Decode Error:", e);
                 return null;
             }
         }
@@ -161,20 +163,25 @@
             const app = document.getElementById('app');
             const title = document.getElementById('title');
             
-            const hash = window.location.hash;
-            if (!hash || !hash.startsWith('#data=')) {
+            const fullHash = window.location.hash;
+            
+            // Проверка наличия данных в хэше
+            if (!fullHash || !fullHash.includes('data=')) {
                 app.innerHTML = `
                     <div class="empty">
                         Данные не найдены.<br>
                         Пожалуйста, откройте инвентарь через кнопку в боте.
+                        <div class="debug-info">URL Hash: ${fullHash || 'empty'}</div>
                     </div>`;
                 return;
             }
 
             try {
-                const base64Data = hash.split('=')[1];
+                // Извлекаем всё, что идет после data=
+                const base64Data = fullHash.substring(fullHash.indexOf('data=') + 5);
                 const decodedStr = b64DecodeUnicode(base64Data);
-                if (!decodedStr) throw new Error("Invalid Base64");
+                
+                if (!decodedStr) throw new Error("Ошибка декодирования Base64");
 
                 const rawItems = JSON.parse(decodedStr);
 
@@ -203,7 +210,8 @@
                 app.innerHTML = `
                     <div class="empty">
                         Ошибка обработки данных.<br>
-                        Попробуйте обновить инвентарь в боте еще раз.
+                        Инвентарь слишком большой или поврежден.
+                        <div class="debug-info">Error: ${e.message}</div>
                     </div>`;
                 console.error("Render error:", e);
             }
