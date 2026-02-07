@@ -1,1 +1,44 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CS2 Price Tracker</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+    <div id="app">
+        <header>
+            <div id="user-info"></div>
+            <h1>Мой Инвентарь</h1>
+        </header>
 
+        <div id="categories" class="tabs"></div>
+
+        <main id="items-view">
+            <div id="items-list" class="grid">
+                <p class="placeholder">Выберите категорию...</p>
+            </div>
+            
+            <div class="pagination">
+                <button id="prev-btn" onclick="prevPage()">⬅️ Назад</button>
+                <span id="page-num">Стр. 1</span>
+                <button id="next-btn" onclick="nextPage()">Вперед ➡️</button>
+            </div>
+        </main>
+
+        <div id="price-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <h3 id="modal-item-name"></h3>
+                <p id="modal-price">Загрузка цены...</p>
+                <div class="modal-actions">
+                    <button class="btn-track" onclick="trackItem()">Отслеживать</button>
+                    <button class="btn-close" onclick="closeModal()">Закрыть</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
