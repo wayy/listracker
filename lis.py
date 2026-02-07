@@ -5,18 +5,52 @@ import os
 import sys
 import subprocess
 import urllib.parse
-import json
-import base64
 from collections import Counter
 from datetime import datetime
 
-# Автоматическая установка необходимых пакетов
+from aiohttp import web
+from supabase import create_client, Client
+
+# === КОНФИГУРАЦИЯ SUPABASE ===
+SUPABASE_URL = "https://trufweyemrkdogsszike.supabase.co"
+SUPABASE_KEY = "sb_publishable_Ywujm6u8WqyG9Y4K5ANOsA_E8umiZqc"
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# === API ДЛЯ MINI APP ===
+async def get_app_inventory(request):
+    chat_id = request.query.get("chat_id")
+    if not chat_id:
+        return web.json_response({"error": "no_id"}, status=400)
+
+    try:
+        # Получаем инвентарь с джоином таблицы предметов
+        res = supabase.table("user_items").select(
+            "amount, items(name, category)"
+        ).eq("chat_id", chat_id).execute()
+        
+        items = []
+        for r in res.data:
+            items.append({
+                "name": r['items']['name'],
+                "amount": r['amount'],
+                "category": r['items']['category']
+            })
+        
+        return web.json_response(items, headers={"Access-Control-Allow-Origin": "*"})
+    except Exception as e:
+        logger.error(f"API Error: {e}")
+        return web.json_response({"error": "db_error"}, status=500)
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Авто-установка зависимостей (добавлен supabase)
 def install_missing_packages():
-    # Добавлены firebase-admin для облака и python-dotenv для секретов
-    packages = ["aiosqlite", "aiogram", "aiohttp", "python-dotenv", "firebase-admin"]
+    packages = ["supabase", "aiogram", "aiohttp", "python-dotenv"]
     for package in packages:
         try:
-            module_name = "firebase_admin" if package == "firebase-admin" else ("dotenv" if package == "python-dotenv" else package)
+            module_name = "supabase" if package == "supabase" else package
             __import__(module_name)
         except ImportError:
             subprocess.check_call([sys.executable, "-m", "pip", "install", package])
@@ -24,9 +58,6 @@ def install_missing_packages():
 install_missing_packages()
 
 import aiohttp
-import aiosqlite
-import firebase_admin
-from firebase_admin import credentials, firestore
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
@@ -36,45 +67,18 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-# --- КОНФИГУРАЦИЯ ---
+# Константы
 TOKEN = os.getenv("BOT_TOKEN", "5070946103:AAFG8N40n9IPR3APhYxMeD-mB81-D7ss7Es")
 APP_ID = 730  # CS2
-DB_PATH = os.path.join(os.getcwd(), "inventory.db")
-WEB_APP_URL = "https://wayy.github.io/listracker/" # Ссылка на GitHub Pages
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 }
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# --- ИНИЦИАЛИЗАЦИЯ FIREBASE ---
-# ВНИМАНИЕ: Положите serviceAccountKey.json в папку с ботом на Bothost!
-db_cloud = None
-cloud_app_id = "cs2-tracker-app" # ID вашего приложения в облаке
-
-try:
-    if not firebase_admin._apps:
-        cred_path = os.path.join(os.getcwd(), "serviceAccountKey.json")
-        if os.path.exists(cred_path):
-            cred = credentials.Certificate(cred_path)
-            firebase_admin.initialize_app(cred)
-            db_cloud = firestore.client()
-            logger.info("Firebase успешно инициализирован.")
-        else:
-            logger.warning("serviceAccountKey.json не найден. Mini App может не работать.")
-except Exception as e:
-    logger.error(f"Ошибка инициализации Firebase: {e}")
-
-# --- СОСТОЯНИЯ ---
 class Registration(StatesGroup):
     waiting_for_steam_link = State()
     selecting_category = State()
     selecting_weapon_type = State()
-
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def get_item_category(name: str) -> str:
     n = name.lower()
@@ -86,72 +90,16 @@ def get_item_category(name: str) -> str:
     if "|" in name: return "🔫 Оружие"
     return "🛠 Прочее"
 
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA journal_mode=WAL") 
-        await db.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY, steam_id TEXT)")
-        await db.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, category TEXT)")
-        await db.execute("CREATE TABLE IF NOT EXISTS user_items (chat_id INTEGER, item_id INTEGER, amount INTEGER, PRIMARY KEY (chat_id, item_id))")
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS tracking (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER,
-                item_name TEXT,
-                last_price REAL,
-                UNIQUE(chat_id, item_name)
-            )
-        """)
-        await db.execute("CREATE TABLE IF NOT EXISTS context_map (id INTEGER PRIMARY KEY AUTOINCREMENT, val TEXT UNIQUE)")
-        await db.commit()
-
+# В Supabase context_map реализуем через таблицу или просто храним значения, 
+# так как ограничения на callback_data все еще есть.
 async def get_ctx_id(val: str) -> int:
     if not val: return 0
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO context_map (val) VALUES (?)", (val,))
-        await db.commit()
-        res = await db.execute("SELECT id FROM context_map WHERE val = ?", (val,))
-        row = await res.fetchone()
-        return row[0] if row else 0
+    res = supabase.table("context_map").upsert({"val": val}, on_conflict="val").execute()
+    return res.data[0]['id']
 
 async def get_ctx_val(ctx_id: int) -> str:
-    async with aiosqlite.connect(DB_PATH) as db:
-        res = await db.execute("SELECT val FROM context_map WHERE id = ?", (ctx_id,))
-        row = await res.fetchone()
-        return row[0] if row else None
-
-# --- СИНХРОНИЗАЦИЯ С ОБЛАКОМ ---
-
-async def sync_inventory_to_cloud(chat_id):
-    """Отправка инвентаря в Firestore для Mini App"""
-    if not db_cloud: return False
-    async with aiosqlite.connect(DB_PATH) as db:
-        query = """
-            SELECT i.name, ui.amount, i.category 
-            FROM items i JOIN user_items ui ON i.id = ui.item_id 
-            WHERE ui.chat_id = ?
-        """
-        async with db.execute(query, (chat_id,)) as cursor:
-            rows = await cursor.fetchall()
-            if not rows: return False
-            
-            # Компактный формат [[name, amount, category]]
-            data = [[r[0], r[1], r[2]] for r in rows]
-            
-            try:
-                # Путь по правилам среды: /artifacts/{appId}/public/data/inventories/{userId}
-                doc_ref = db_cloud.collection('artifacts').document(cloud_app_id)\
-                                  .collection('public').document('data')\
-                                  .collection('inventories').document(str(chat_id))
-                doc_ref.set({
-                    'items': data,
-                    'updatedAt': firestore.SERVER_TIMESTAMP
-                })
-                return True
-            except Exception as e:
-                logger.error(f"Cloud sync error: {e}")
-                return False
-
-# --- ПАРСИНГ STEAM И ЦЕН ---
+    res = supabase.table("context_map").select("val").eq("id", ctx_id).execute()
+    return res.data[0]['val'] if res.data else None
 
 def parse_price(price_str):
     if not price_str: return 0.0
@@ -172,6 +120,7 @@ def parse_price(price_str):
 async def get_steam_price(item_name):
     encoded_name = urllib.parse.quote(item_name)
     url = f"https://steamcommunity.com/market/priceoverview/?appid={APP_ID}&currency=5&market_hash_name={encoded_name}"
+    
     async with aiohttp.ClientSession(headers=HEADERS) as s:
         try:
             async with s.get(url, timeout=5) as r:
@@ -221,24 +170,27 @@ async def fetch_inventory(steam_id):
         except: return None
 
 async def save_inventory_to_db(chat_id, steam_id, items_counts):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN TRANSACTION")
-        await db.execute("INSERT OR REPLACE INTO users VALUES (?,?)", (chat_id, steam_id))
-        await db.execute("DELETE FROM user_items WHERE chat_id = ?", (chat_id,))
-        for name, count in items_counts.items():
-            cat = get_item_category(name)
-            await db.execute("INSERT OR IGNORE INTO items (name, category) VALUES (?,?)", (name, cat))
-            res = await db.execute("SELECT id FROM items WHERE name = ?", (name,))
-            item_id = (await res.fetchone())[0]
-            await db.execute("INSERT INTO user_items (chat_id, item_id, amount) VALUES (?,?,?)", (chat_id, item_id, count))
-        await db.commit()
+    # В Supabase это транзакция через цепочку вызовов или последовательно
+    supabase.table("users").upsert({"chat_id": chat_id, "steam_id": steam_id}).execute()
+    supabase.table("user_items").delete().eq("chat_id", chat_id).execute()
+    
+    for name, count in items_counts.items():
+        cat = get_item_category(name)
+        # Сохраняем предмет
+        item_res = supabase.table("items").upsert({"name": name, "category": cat}, on_conflict="name").execute()
+        item_id = item_res.data[0]['id']
+        # Привязываем к юзеру
+        supabase.table("user_items").insert({"chat_id": chat_id, "item_id": item_id, "amount": count}).execute()
 
-# --- КЛАВИАТУРЫ ---
+dp = Dispatcher()
+bot_instance = None
+
+# === КЛАВИАТУРЫ ===
 
 def get_main_menu_kb():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="📦 Инвентарь"), KeyboardButton(text="📱 Mini App")],
-        [KeyboardButton(text="📈 Отслеживание")]
+        [KeyboardButton(text="📱 Mini App", web_app=WebAppInfo(url="ВАШ_URL_GITHUB_PAGES"))],
+        [KeyboardButton(text="📦 Инвентарь"), KeyboardButton(text="📈 Отслеживание")]
     ], resize_keyboard=True)
 
 def get_categories_kb(items):
@@ -268,54 +220,60 @@ async def get_items_inline_kb(items_data, page=0, mode="cat", value=""):
     current_page_items = items_data[start:end]
     
     keyboard = []
-    for item_id, name, amount in current_page_items:
+    for item in current_page_items:
+        # Универсальная обработка структуры данных
+        iid = item.get('id') or item.get('item_id')
+        name = item.get('name') or item.get('item_name') or (item.get('items', {}).get('name'))
+        amount = item.get('amount', 1)
+        
         btn_text = f"{name} (x{amount})"
         if len(btn_text) > 40: btn_text = btn_text[:37] + "..."
-        if mode == "trc":
-            keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"trv_{item_id}")])
-        else:
-            keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_{item_id}")])
+        
+        cb_data = f"trv_{iid}" if mode == "trc" else f"view_{iid}"
+        keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
     
     nav_row = []
     prefix = "pc" if mode == "cat" else "pw" if mode == "wep" else "pt"
     ctx_id = await get_ctx_id(value) if value else 0
+    
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="⬅️ Пред.", callback_data=f"{prefix}_{page-1}_{ctx_id}"))
     if end < len(items_data):
         nav_row.append(InlineKeyboardButton(text="След. ➡️", callback_data=f"{prefix}_{page+1}_{ctx_id}"))
-    if nav_row:
-        keyboard.append(nav_row)
+    
+    if nav_row: keyboard.append(nav_row)
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# --- ЛОГИКА ОБНОВЛЕНИЯ ---
+# === ЛОГИКА ОБНОВЛЕНИЯ ===
 
 async def update_inventory_logic(m: Message, state: FSMContext, silent=False):
     sid = await resolve_steam_id(m.text)
     if not sid: 
         if not silent: await m.answer("❌ Неверная ссылка или ID.")
         return False
+    
     if not silent: wait = await m.answer("⏳ Сканирую инвентарь...")
     items_counts = await fetch_inventory(sid)
+    
     if items_counts is None: 
         if not silent: await wait.edit_text("❌ Ошибка доступа. Проверь приватность профиля.")
         return False
+    
     try:
         await save_inventory_to_db(m.chat.id, sid, items_counts or {})
     except Exception as e:
-        logger.error(f"DB Error: {e}")
-        if not silent: await wait.edit_text("❌ Ошибка базы данных.")
+        logger.error(f"Supabase Error: {e}")
+        if not silent: await wait.edit_text("❌ Ошибка облачной базы данных.")
         return False
+
     if not silent:
         await wait.delete()
         count = len(items_counts) if items_counts else 0
-        await m.answer(f"✅ Успех! Найдено предметов: `{count}`.", reply_markup=get_main_menu_kb(), parse_mode="Markdown")
+        await m.answer(f"✅ Найдено предметов: `{count}`.\nОблако обновлено!", reply_markup=get_main_menu_kb(), parse_mode="Markdown")
     await state.clear()
     return True
 
-# === ХЕНДЛЕРЫ ===
-
-dp = Dispatcher()
-bot_instance = None
+# === HANDLERS ===
 
 @dp.message(F.text.contains("steamcommunity.com"))
 async def global_link_update(m: Message, state: FSMContext):
@@ -323,14 +281,12 @@ async def global_link_update(m: Message, state: FSMContext):
 
 @dp.message(Command("start"))
 async def cmd_start(m: Message, state: FSMContext):
-    async with aiosqlite.connect(DB_PATH) as db:
-        res = await db.execute("SELECT steam_id FROM users WHERE chat_id = ?", (m.chat.id,))
-        user = await res.fetchone()
-    if user:
+    res = supabase.table("users").select("steam_id").eq("chat_id", m.chat.id).execute()
+    if res.data:
         await m.answer("🏠 Главное меню:", reply_markup=get_main_menu_kb())
         await state.clear()
     else:
-        await m.answer("👋 Привет! Пришли ссылку на Steam профиль (инвентарь должен быть открыт).", reply_markup=ReplyKeyboardRemove())
+        await m.answer("👋 Привет! Пришли ссылку на Steam профиль.", reply_markup=ReplyKeyboardRemove())
         await state.set_state(Registration.waiting_for_steam_link)
 
 @dp.message(Registration.waiting_for_steam_link)
@@ -339,60 +295,40 @@ async def process_link_reg(m: Message, state: FSMContext):
 
 @dp.message(F.text == "📦 Инвентарь")
 async def open_inventory(m: Message, state: FSMContext):
-    async with aiosqlite.connect(DB_PATH) as db:
-        res = await db.execute("SELECT DISTINCT i.category FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ?", (m.chat.id,))
-        cats = [r[0] for r in await res.fetchall()]
-        if not cats:
-            res_user = await db.execute("SELECT steam_id FROM users WHERE chat_id = ?", (m.chat.id,))
-            user = await res_user.fetchone()
-            if user:
-                status = await m.answer("🔄 Обновляю данные из Steam...")
-                m.text = user[0] 
-                if await update_inventory_logic(m, state, silent=True):
-                    await status.delete()
-                    return await open_inventory(m, state)
-                else:
-                    return await status.edit_text("❌ Не удалось загрузить инвентарь.")
-            return await m.answer("Сначала пришлите ссылку на Steam профиль.")
-        await m.answer("Выберите категорию:", reply_markup=get_categories_kb(cats))
-        await state.set_state(Registration.selecting_category)
-
-@dp.message(F.text == "📱 Mini App")
-async def open_mini_app(m: Message):
-    wait = await m.answer("⏳ Синхронизация с облаком...")
-    success = await sync_inventory_to_cloud(m.chat.id)
-    if not success:
-        return await wait.edit_text("❌ Ошибка синхронизации. Проверьте serviceAccountKey.json.")
+    res = supabase.table("user_items").select("items(category)").eq("chat_id", m.chat.id).execute()
+    cats = sorted(list(set([r['items']['category'] for r in res.data if r.get('items')])))
     
-    link = f"{WEB_APP_URL}?user_id={m.chat.id}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Открыть инвентарь 🚀", web_app=WebAppInfo(url=link))
-    ]])
-    await wait.delete()
-    await m.answer("Ваш инвентарь готов для Mini App:", reply_markup=kb)
+    if not cats:
+        user_res = supabase.table("users").select("steam_id").eq("chat_id", m.chat.id).execute()
+        if user_res.data:
+            status = await m.answer("🔄 Обновляю из Steam...")
+            m.text = user_res.data[0]['steam_id']
+            if await update_inventory_logic(m, state, silent=True):
+                await status.delete()
+                return await open_inventory(m, state)
+        return await m.answer("Сначала пришлите ссылку на Steam.")
 
-@dp.message(F.text == "🔫 Оружие")
-async def show_weapon_shortcut(m: Message, state: FSMContext):
+    await m.answer("Выберите категорию:", reply_markup=get_categories_kb(cats))
     await state.set_state(Registration.selecting_category)
-    await show_category_items(m, state)
 
 @dp.message(Registration.selecting_category)
 async def show_category_items(m: Message, state: FSMContext):
     if m.text == "🏠 В главное меню":
         await m.answer("🏠 Главное меню", reply_markup=get_main_menu_kb())
         return await state.clear()
+
     if m.text == "🔫 Оружие":
-        async with aiosqlite.connect(DB_PATH) as db:
-            query = "SELECT i.name FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ? AND i.category = '🔫 Оружие'"
-            res = await db.execute(query, (m.chat.id,))
-            rows = await res.fetchall()
-            if not rows: return await m.answer("В этой категории пусто.")
-            weapon_types = set()
-            for row in rows:
-                if "|" in row[0]: weapon_types.add(row[0].split("|")[0].strip())
-            await m.answer("🔫 Выбери тип оружия:", reply_markup=get_weapon_types_kb(weapon_types))
-            await state.set_state(Registration.selecting_weapon_type)
-            return
+        res = supabase.table("user_items").select("items(name)").eq("chat_id", m.chat.id).execute()
+        weapon_types = set()
+        for r in res.data:
+            name = r['items']['name']
+            if "|" in name: weapon_types.add(name.split("|")[0].strip())
+        
+        if not weapon_types: return await m.answer("В этой категории пусто.")
+        await m.answer("🔫 Выбери тип оружия:", reply_markup=get_weapon_types_kb(weapon_types))
+        await state.set_state(Registration.selecting_weapon_type)
+        return
+
     await send_paged_items(m.chat.id, category=m.text, page=0)
 
 @dp.message(Registration.selecting_weapon_type)
@@ -401,140 +337,132 @@ async def show_weapon_type_items(m: Message, state: FSMContext):
     await send_paged_items(m.chat.id, weapon_type=m.text, page=0)
 
 async def send_paged_items(chat_id, category=None, weapon_type=None, page=0):
-    mode, val = "cat", category
-    async with aiosqlite.connect(DB_PATH) as db:
-        if weapon_type:
-            query = """SELECT i.id, i.name, ui.amount FROM items i JOIN user_items ui ON i.id = ui.item_id 
-                       WHERE ui.chat_id = ? AND i.category = '🔫 Оружие' AND i.name LIKE ? ORDER BY ui.amount DESC, i.name ASC"""
-            args = (chat_id, f"{weapon_type} | %")
-            title, mode, val = f"🔫 {weapon_type}", "wep", weapon_type
-        else:
-            query = """SELECT i.id, i.name, ui.amount FROM items i JOIN user_items ui ON i.id = ui.item_id 
-                       WHERE ui.chat_id = ? AND i.category = ? ORDER BY ui.amount DESC, i.name ASC"""
-            args, title = (chat_id, category), f"📂 {category}"
-        res = await db.execute(query, args)
-        rows = await res.fetchall()
-    if not rows: return await bot_instance.send_message(chat_id, "❌ Предметы не найдены.")
+    mode = "cat"
+    val = category
+    
+    if weapon_type:
+        res = supabase.table("user_items").select("amount, items(id, name)").eq("chat_id", chat_id).ilike("items.name", f"{weapon_type} | %").execute()
+        title = f"🔫 {weapon_type}"
+        mode = "wep"
+        val = weapon_type
+    else:
+        res = supabase.table("user_items").select("amount, items(id, name)").eq("chat_id", chat_id).eq("items.category", category).execute()
+        title = f"📂 {category}"
+    
+    # Фильтруем None (если джоин не сработал) и мапим данные
+    rows = []
+    for r in res.data:
+        if r.get('items'):
+            rows.append({'id': r['items']['id'], 'name': r['items']['name'], 'amount': r['amount']})
+    
+    if not rows:
+        await bot_instance.send_message(chat_id, "❌ Предметы не найдены.")
+        return
+
     kb = await get_items_inline_kb(rows, page, mode=mode, value=val)
     await bot_instance.send_message(chat_id, f"*{title}*\nСтраница: {page+1}", reply_markup=kb, parse_mode="Markdown")
 
+# === ОТСЛЕЖИВАНИЕ ===
+
 @dp.message(F.text == "📈 Отслеживание")
 async def cmd_tracking(m: Message):
-    async with aiosqlite.connect(DB_PATH) as db:
-        query = "SELECT id, item_name, last_price FROM tracking WHERE chat_id = ? ORDER BY item_name ASC"
-        res = await db.execute(query, (m.chat.id,))
-        rows = await res.fetchall()
-    if not rows: return await m.answer("Список отслеживания пуст.")
-    kb = await get_items_inline_kb(rows, page=0, mode="trc", value="tracking_list")
-    await m.answer("*📈 Ваши отслеживаемые предметы:*\nСтраница: 1", reply_markup=kb, parse_mode="Markdown")
+    res = supabase.table("tracking").select("*").eq("chat_id", m.chat.id).order("item_name").execute()
+    if not res.data: return await m.answer("Список отслеживания пуст.")
+    kb = await get_items_inline_kb(res.data, page=0, mode="trc", value="tracking_list")
+    await m.answer("*📈 Ваши отслеживаемые предметы:*", reply_markup=kb, parse_mode="Markdown")
+
+# === ПАГИНАТОР И CALLBACKS ===
 
 @dp.callback_query(F.data.startswith(("pc_", "pw_", "pt_")))
 async def handle_pagination(call: CallbackQuery):
-    try:
-        parts = call.data.split("_")
-        prefix, page, ctx_id = parts[0], int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
-        value = await get_ctx_val(ctx_id) if ctx_id > 0 else ""
-        if ctx_id > 0 and value is None: return await call.answer("⚠️ Сессия истекла.", show_alert=True)
-        if prefix == "pc": await send_paged_items(call.message.chat.id, category=value, page=page)
-        elif prefix == "pw": await send_paged_items(call.message.chat.id, weapon_type=value, page=page)
-        elif prefix == "pt":
-            async with aiosqlite.connect(DB_PATH) as db:
-                res = await db.execute("SELECT id, item_name, last_price FROM tracking WHERE chat_id = ? ORDER BY item_name ASC", (call.message.chat.id,))
-                rows = await res.fetchall()
-            kb = await get_items_inline_kb(rows, page=page, mode="trc", value="tracking_list")
-            await bot_instance.send_message(call.message.chat.id, f"*📈 Отслеживание:*\nСтраница: {page+1}", reply_markup=kb, parse_mode="Markdown")
-    except: pass
-    finally: await call.answer()
+    parts = call.data.split("_")
+    prefix, page = parts[0], int(parts[1])
+    ctx_id = int(parts[2]) if len(parts) > 2 else 0
+    value = await get_ctx_val(ctx_id) if ctx_id > 0 else ""
+
+    if prefix == "pc": await send_paged_items(call.message.chat.id, category=value, page=page)
+    elif prefix == "pw": await send_paged_items(call.message.chat.id, weapon_type=value, page=page)
+    elif prefix == "pt":
+        res = supabase.table("tracking").select("*").eq("chat_id", call.message.chat.id).order("item_name").execute()
+        kb = await get_items_inline_kb(res.data, page=page, mode="trc", value="tracking_list")
+        await bot_instance.send_message(call.message.chat.id, f"📈 Страница: {page+1}", reply_markup=kb)
+    await call.answer()
 
 @dp.callback_query(F.data.startswith("view_"))
 async def handle_view_item(call: CallbackQuery):
     item_id = int(call.data.split("_")[1])
+    res = supabase.table("items").select("name").eq("id", item_id).execute()
+    if not res.data: return
+    name = res.data[0]['name']
+    
     await call.answer("🔎 Ищу цену...")
-    async with aiosqlite.connect(DB_PATH) as db:
-        res = await db.execute("SELECT name FROM items WHERE id = ?", (item_id,))
-        row = await res.fetchone()
-        if not row: return
-        name = row[0]
     price_val, price_str = await get_steam_price(name)
-    text = f"📦 *Предмет:* `{name}`\n"
+    text = f"📦 *{name}*\n💰 *Цена:* `{price_str}`"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📈 Отслеживать", callback_data=f"track_{item_id}")]]) if price_val else None
-    await call.message.answer(text + (f"💰 *Цена:* `{price_str}`" if price_val else f"⚠️ *Ошибка:* {price_str}"), parse_mode="Markdown", reply_markup=kb)
+    await call.message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("track_"))
 async def handle_add_track(call: CallbackQuery):
     item_id = int(call.data.split("_")[1])
-    async with aiosqlite.connect(DB_PATH) as db:
-        res = await db.execute("SELECT name FROM items WHERE id = ?", (item_id,))
-        name = (await res.fetchone())[0]
-        price_val, _ = await get_steam_price(name)
-        if not price_val: return await call.answer("Невозможно отслеживать", show_alert=True)
-        try:
-            await db.execute("INSERT INTO tracking (chat_id, item_name, last_price) VALUES (?,?,?)", (call.message.chat.id, name, price_val))
-            await db.commit()
-            await call.message.answer(f"✅ *Отслеживание запущено!*\n`{name}`", parse_mode="Markdown")
-        except: await call.answer("Уже в списке", show_alert=True)
+    res = supabase.table("items").select("name").eq("id", item_id).execute()
+    name = res.data[0]['name']
+    price_val, _ = await get_steam_price(name)
+    
+    try:
+        supabase.table("tracking").insert({"chat_id": call.message.chat.id, "item_name": name, "last_price": price_val}).execute()
+        await call.message.answer(f"✅ Отслеживаю: `{name}`")
+    except:
+        await call.answer("Уже в списке", show_alert=True)
 
 @dp.callback_query(F.data.startswith("trv_"))
 async def handle_track_view(call: CallbackQuery):
     track_id = int(call.data.split("_")[1])
-    async with aiosqlite.connect(DB_PATH) as db:
-        res = await db.execute("SELECT item_name, last_price FROM tracking WHERE id = ?", (track_id,))
-        row = await res.fetchone()
-    if not row: return await call.answer("Запись удалена", show_alert=True)
-    name, last_price = row
-    _, price_str = await get_steam_price(name)
+    res = supabase.table("tracking").select("*").eq("id", track_id).execute()
+    if not res.data: return
+    row = res.data[0]
+    current_price, price_str = await get_steam_price(row['item_name'])
+    text = f"📦 *{row['item_name']}*\n📌 Было: `{row['last_price']}`\n💰 Сейчас: `{price_str}`"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Удалить", callback_data=f"deltr_{track_id}")]])
-    await call.message.answer(f"📦 *{name}*\n\n📌 Базовая: `{last_price}`\n💰 Текущая: `{price_str}`", parse_mode="Markdown", reply_markup=kb)
-    await call.answer()
+    await call.message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("deltr_"))
 async def handle_del_track(call: CallbackQuery):
     track_id = int(call.data.split("_")[1])
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM tracking WHERE id = ?", (track_id,))
-        await db.commit()
-    await call.message.answer(f"❌ *Отслеживание остановлено.*", parse_mode="Markdown")
-    await call.answer()
+    supabase.table("tracking").delete().eq("id", track_id).execute()
+    await call.message.answer("❌ Удалено.")
 
 @dp.message()
 async def handle_fallback(m: Message, state: FSMContext):
     if m.text == "🏠 В главное меню":
         await m.answer("🏠 Главное меню", reply_markup=get_main_menu_kb())
         return await state.clear()
-    async with aiosqlite.connect(DB_PATH) as db:
-        res = await db.execute("SELECT 1 FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ? AND i.category = ? LIMIT 1", (m.chat.id, m.text))
-        if await res.fetchone():
-            await state.set_state(Registration.selecting_category)
-            return await show_category_items(m, state)
-        res = await db.execute("SELECT 1 FROM items i JOIN user_items ui ON i.id = ui.item_id WHERE ui.chat_id = ? AND i.category = '🔫 Оружие' AND i.name LIKE ? LIMIT 1", (m.chat.id, f"{m.text} | %"))
-        if await res.fetchone():
-            await state.set_state(Registration.selecting_weapon_type)
-            return await show_weapon_type_items(m, state)
     await m.answer("Выберите пункт меню 👇", reply_markup=get_main_menu_kb())
 
 async def monitor_prices_task():
     while True:
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
-                cursor = await db.execute("SELECT id, chat_id, item_name, last_price FROM tracking")
-                tracks = await cursor.fetchall()
-                for tid, chat_id, name, last_price in tracks:
-                    await asyncio.sleep(2)
-                    current_price, price_str = await get_steam_price(name)
-                    if current_price and current_price > last_price:
-                        try:
-                            await bot_instance.send_message(chat_id, f"📈 *Цена выросла!*\n`{name}`\nБыло: `{last_price}` -> `{price_str}`", parse_mode="Markdown")
-                            await db.execute("UPDATE tracking SET last_price = ? WHERE id = ?", (current_price, tid))
-                            await db.commit()
-                        except: pass
-        except: pass
+            res = supabase.table("tracking").select("*").execute()
+            for row in res.data:
+                await asyncio.sleep(5)
+                curr, s_curr = await get_steam_price(row['item_name'])
+                if curr and curr > float(row['last_price']):
+                    msg = f"📈 *Цена UP!*\n`{row['item_name']}`\n`{row['last_price']}` -> `{s_curr}`"
+                    await bot_instance.send_message(row['chat_id'], msg, parse_mode="Markdown")
+                    supabase.table("tracking").update({"last_price": curr}).eq("id", row['id']).execute()
+        except Exception as e: logger.error(f"Monitor: {e}")
         await asyncio.sleep(3600)
 
 async def main():
     global bot_instance
-    await init_db()
     bot = Bot(token=TOKEN)
     bot_instance = bot
+    
+    app = web.Application()
+    app.router.add_get('/api/inventory', get_app_inventory)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', 8080).start()
+    
     asyncio.create_task(monitor_prices_task())
     await dp.start_polling(bot)
 
