@@ -2,162 +2,119 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>CS2 Inventory Cloud</title>
-    <!-- Подключаем Firebase SDK -->
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CS2 Inventory</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
     <style>
         :root {
-            --bg: #0d0e12;
-            --card: #1c1e26;
-            --accent: #4b89ff;
-            --text: #ffffff;
-            --text-dim: #8b92a5;
-            --rarity-rare: #4b69ff;
+            --tg-theme-bg-color: #1a1a1b;
+            --tg-theme-text-color: #ffffff;
+            --tg-theme-hint-color: #999;
+            --accent-color: #ff9a00;
         }
+
         body {
-            background: var(--bg);
-            color: var(--text);
-            font-family: -apple-system, system-ui, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--tg-theme-bg-color);
+            color: var(--tg-theme-text-color);
             margin: 0;
-            padding: 15px;
+            padding: 16px;
         }
-        .header { 
-            margin-bottom: 20px; 
-            font-weight: 800; 
-            font-size: 1.3em; 
-            border-bottom: 1px solid #333; 
-            padding-bottom: 10px; 
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
         }
-        .grid { 
-            display: grid; 
-            grid-template-columns: repeat(2, 1fr); 
-            gap: 12px; 
-        }
-        .item {
-            background: var(--card);
-            border: 1px solid #2d313d;
+
+        .item-card {
+            background: #252526;
             border-radius: 12px;
             padding: 12px;
-            font-size: 12px;
-            min-height: 80px;
+            margin-bottom: 10px;
             display: flex;
-            flex-direction: column;
             justify-content: space-between;
-            border-bottom: 3px solid var(--rarity-rare);
+            align-items: center;
+            border-left: 4px solid var(--accent-color);
         }
-        .item-name { 
-            font-weight: 500; 
-            margin-bottom: 5px; 
-            line-height: 1.3; 
-        }
-        .item-count { 
-            color: var(--accent); 
-            font-weight: bold; 
-        }
-        .loader { 
-            text-align: center; 
-            padding-top: 100px; 
-            color: var(--text-dim); 
-        }
-        .error { 
-            color: #eb4b4b; 
-            background: rgba(235,75,75,0.1); 
-            padding: 15px; 
-            border-radius: 10px; 
-            text-align: center; 
-            margin-top: 20px; 
-        }
+
+        .item-info { display: flex; flex-direction: column; }
+        .item-name { font-weight: 600; font-size: 14px; }
+        .item-category { font-size: 12px; color: var(--tg-theme-hint-color); }
+        .item-amount { font-weight: bold; color: var(--accent-color); font-size: 16px; }
+
+        #loader { text-align: center; margin-top: 50px; color: var(--tg-theme-hint-color); }
+        .empty-state { text-align: center; margin-top: 100px; color: var(--tg-theme-hint-color); }
     </style>
 </head>
 <body>
-    <div class="header" id="title">Инвентарь</div>
-    <div id="app">
-        <div class="loader">Синхронизация...</div>
+
+    <div class="header">
+        <h2 id="user-name">Инвентарь</h2>
     </div>
 
+    <div id="loader">Загрузка предметов из облака...</div>
+    <div id="inventory-list"></div>
+
     <script>
+        // Инициализация Telegram
         const tg = window.Telegram.WebApp;
-        tg.ready();
-        tg.expand();
+        tg.expand(); // Разворачиваем приложение
 
-        // Безопасное получение конфига из среды
-        let firebaseConfig = {};
-        try {
-            // В среде выполнения переменные __firebase_config и __app_id 
-            // предоставляются платформой автоматически.
-            if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-                firebaseConfig = JSON.parse(__firebase_config);
+        // Конфигурация Supabase
+        const SUPABASE_URL = 'ВАШ_URL_SUPABASE';
+        const SUPABASE_KEY = 'ВАШ_KEY_SUPABASE';
+        const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        async function loadInventory() {
+            const user = tg.initDataUnsafe?.user;
+            const userId = user?.id || 12345678; // 12345678 для тестов в браузере
+
+            if (user) {
+                document.getElementById('user-name').innerText = `Инвентарь ${user.first_name}`;
             }
-        } catch (e) {
-            console.error("Ошибка парсинга конфига Firebase", e);
-        }
 
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'cs2-tracker-app';
+            try {
+                // Запрос к Supabase с JOIN таблицы items
+                const { data, error } = await supabase
+                    .from('user_items')
+                    .select(`
+                        amount,
+                        items (name, category)
+                    `)
+                    .eq('chat_id', userId);
 
-        if (Object.keys(firebaseConfig).length > 0) {
-            firebase.initializeApp(firebaseConfig);
-            const db = firebase.firestore();
+                if (error) throw error;
 
-            async function loadCloudData() {
-                const app = document.getElementById('app');
-                const urlParams = new URLSearchParams(window.location.search);
-                const userId = urlParams.get('user_id') || tg.initDataUnsafe.user?.id;
+                const listContainer = document.getElementById('inventory-list');
+                const loader = document.getElementById('loader');
+                loader.style.display = 'none';
 
-                if (!userId) {
-                    app.innerHTML = '<div class="error">Ошибка: ID пользователя не найден. Откройте приложение через бота.</div>';
+                if (!data || data.length === 0) {
+                    listContainer.innerHTML = '<div class="empty-state">У вас пока нет предметов в базе. Отправьте ссылку на Steam боту!</div>';
                     return;
                 }
 
-                try {
-                    // Авторизация согласно правилам платформы
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        await firebase.auth().signInWithCustomToken(__initial_auth_token);
-                    } else {
-                        await firebase.auth().signInAnonymously();
-                    }
-
-                    // Чтение данных из пути: /artifacts/{appId}/public/data/inventories/{userId}
-                    const docRef = db.collection('artifacts').doc(appId)
-                                     .collection('public').doc('data')
-                                     .collection('inventories').doc(userId.toString());
-                    
-                    const doc = await docRef.get();
-
-                    if (!doc.exists) {
-                        app.innerHTML = '<div class="error">Данные в облаке не найдены. Нажмите кнопку в боте еще раз для синхронизации.</div>';
-                        return;
-                    }
-
-                    const items = doc.data().items || [];
-                    
-                    if (items.length === 0) {
-                        app.innerHTML = '<div class="loader">Ваш инвентарь пуст.</div>';
-                        return;
-                    }
-
-                    app.innerHTML = `<div class="grid">` + items.map(item => `
-                        <div class="item">
-                            <div class="item-name">${item[0]}</div>
-                            <div class="item-footer">
-                                <span class="item-count">x${item[1]}</span>
-                            </div>
+                // Рендерим карточки
+                listContainer.innerHTML = data.map(row => `
+                    <div class="item-card">
+                        <div class="item-info">
+                            <span class="item-name">${row.items.name}</span>
+                            <span class="item-category">${row.items.category}</span>
                         </div>
-                    `).join('') + `</div>`;
+                        <div class="item-amount">x${row.amount}</div>
+                    </div>
+                `).join('');
 
-                } catch (e) {
-                    console.error("Cloud Error:", e);
-                    app.innerHTML = '<div class="error">Ошибка облачного хранилища: ' + e.message + '</div>';
-                }
+            } catch (err) {
+                console.error(err);
+                document.getElementById('loader').innerText = 'Ошибка загрузки данных.';
             }
-
-            loadCloudData();
-        } else {
-            document.getElementById('app').innerHTML = '<div class="error">Конфигурация Firebase не найдена. Убедитесь, что настройки проекта указаны верно.</div>';
         }
+
+        loadInventory();
     </script>
 </body>
 </html>
