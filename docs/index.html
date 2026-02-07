@@ -3,171 +3,89 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>CS2 Tracker App</title>
+    <title>CS2 Inventory</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         :root {
-            --bg-color: #0d0e12;
-            --card-bg: #1a1c23;
-            --text-main: #ffffff;
-            --text-dim: #8b92a5;
+            --bg: #0f1015;
+            --card: #1c1e26;
             --accent: #4b89ff;
-            --rarity-common: #b0c3d9;
-            --rarity-rare: #4b69ff;
-            --rarity-mythical: #8847ff;
-            --rarity-legendary: #d32ce6;
-            --rarity-ancient: #eb4b4b;
+            --rare: #4b69ff;
         }
-
         body {
-            background-color: var(--bg-color);
-            color: var(--text-main);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: #fff;
+            font-family: sans-serif;
             margin: 0;
             padding: 15px;
-            user-select: none;
         }
-
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-        }
-
-        .header h1 {
-            font-size: 20px;
-            margin: 0;
-        }
-
-        .inventory-grid {
+        .header { margin-bottom: 20px; font-weight: bold; font-size: 1.2em; }
+        .grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
+            gap: 10px;
         }
-
-        .item-card {
-            background: var(--card-bg);
+        .item {
+            background: var(--card);
             border: 1px solid #2d313d;
             border-radius: 12px;
             padding: 12px;
-            display: flex;
-            flex-direction: column;
-            transition: transform 0.1s;
-        }
-
-        .item-card:active {
-            transform: scale(0.97);
-        }
-
-        .item-name {
             font-size: 13px;
-            font-weight: 600;
-            margin-bottom: 4px;
-            height: 36px;
-            overflow: hidden;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
+            border-bottom: 4px solid var(--rare);
         }
-
-        .item-info {
-            font-size: 11px;
-            color: var(--text-dim);
-            display: flex;
-            justify-content: space-between;
-            margin-top: auto;
-        }
-
-        .item-amount {
+        .item-count {
             color: var(--accent);
             font-weight: bold;
+            margin-top: 5px;
+            display: block;
         }
-
-        .loader {
-            text-align: center;
-            padding: 50px;
-            color: var(--text-dim);
-        }
-
-        .error-box {
-            background: rgba(235, 75, 75, 0.1);
-            color: var(--rarity-ancient);
-            padding: 15px;
-            border-radius: 10px;
-            text-align: center;
-            font-size: 14px;
-        }
+        .empty { text-align: center; color: #555; padding-top: 50px; }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1 id="user-name">Инвентарь</h1>
-    </div>
-
-    <div id="content">
-        <div class="loader">Загрузка предметов...</div>
-    </div>
+    <div class="header" id="title">Инвентарь</div>
+    <div id="app" class="grid"></div>
 
     <script>
         const tg = window.Telegram.WebApp;
         tg.ready();
         tg.expand();
 
-        // ВНИМАНИЕ: Замени на реальный IP твоего сервера Bothost
-        const API_BASE = "http://ВАШ_IP_БОТХОСТА:8080"; 
-
-        if (tg.initDataUnsafe.user) {
-            document.getElementById('user-name').innerText = `Инвентарь ${tg.initDataUnsafe.user.first_name}`;
-        }
-
-        async function fetchData() {
-            const content = document.getElementById('content');
+        function render() {
+            const app = document.getElementById('app');
+            const title = document.getElementById('title');
             
-            try {
-                const response = await fetch(`${API_BASE}/api/inventory`, {
-                    headers: {
-                        "Authorization": tg.initData
-                    }
-                });
-
-                if (!response.ok) {
-                    throw new Error(response.status === 401 ? "Ошибка авторизации" : "Сервер недоступен");
-                }
-
-                const data = await response.json();
-                renderInventory(data);
-
-            } catch (err) {
-                content.innerHTML = `<div class="error-box">Не удалось загрузить данные.<br><small>${err.message}</small></div>`;
-            }
-        }
-
-        function renderInventory(items) {
-            const content = document.getElementById('content');
-            
-            if (items.length === 0) {
-                content.innerHTML = '<div class="loader">Ваш инвентарь в базе пуст.</div>';
+            // Получаем данные из URL (#data=...)
+            const hash = window.location.hash;
+            if (!hash || !hash.startsWith('#data=')) {
+                app.innerHTML = '<div class="empty">Данные не найдены.<br>Запустите через бота.</div>';
                 return;
             }
 
-            let html = '<div class="inventory-grid">';
-            items.forEach(item => {
-                html += `
-                    <div class="item-card">
-                        <div class="item-name">${item.name}</div>
-                        <div class="item-info">
-                            <span>${item.category.split(' ')[1] || 'Предмет'}</span>
-                            <span class="item-amount">x${item.amount}</span>
-                        </div>
+            try {
+                const base64Data = hash.split('=')[1];
+                // Декодируем Base64 в JSON
+                const decodedStr = decodeURIComponent(escape(atob(base64Data)));
+                const items = JSON.parse(decodedStr);
+
+                if (tg.initDataUnsafe.user) {
+                    title.innerText = `Инвентарь: ${tg.initDataUnsafe.user.first_name}`;
+                }
+
+                app.innerHTML = items.map(item => `
+                    <div class="item">
+                        <div>${item.n}</div>
+                        <span class="item-count">Кол-во: ${item.a}</span>
                     </div>
-                `;
-            });
-            html += '</div>';
-            content.innerHTML = html;
+                `).join('');
+
+            } catch (e) {
+                app.innerHTML = '<div class="empty">Ошибка обработки данных.</div>';
+                console.error(e);
+            }
         }
 
-        fetchData();
+        render();
     </script>
 </body>
 </html>
