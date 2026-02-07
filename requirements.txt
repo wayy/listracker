@@ -2,3 +2,4 @@ aiogram
 aiohttp
 aiosqlite
 python-dotenv
+supabase
