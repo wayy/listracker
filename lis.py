@@ -146,13 +146,47 @@ async def fetch_inventory(steam_id):
         except: return None
 
 async def save_inventory_to_db(chat_id, steam_id, items_counts):
-    supabase.table("users").upsert({"chat_id": chat_id, "steam_id": steam_id}).execute()
-    supabase.table("user_items").delete().eq("chat_id", chat_id).execute()
-    for name, count in items_counts.items():
-        cat = get_item_category(name)
-        item_res = supabase.table("items").upsert({"name": name, "category": cat}, on_conflict="name").execute()
-        item_id = item_res.data[0]['id']
-        supabase.table("user_items").insert({"chat_id": chat_id, "item_id": item_id, "amount": count}).execute()
+    try:
+        # 1. Быстро обновляем пользователя
+        supabase.table("users").upsert({"chat_id": chat_id, "steam_id": steam_id}).execute()
+
+        # 2. Массовая подготовка предметов в каталоге
+        # Подготавливаем данные для таблицы 'items'
+        all_items_data = [
+            {"name": name, "category": get_item_category(name)} 
+            for name in items_counts.keys()
+        ]
+        
+        # Делаем ОДИН запрос на вставку всех предметов (те, что есть, просто проигнорируются)
+        # В Supabase это делается через upsert всего списка сразу
+        supabase.table("items").upsert(all_items_data, on_conflict="name").execute()
+
+        # 3. Получаем ID всех нужных нам предметов одним запросом
+        # Это нужно, чтобы связать названия с их внутренними ID в базе
+        item_names = list(items_counts.keys())
+        res = supabase.table("items").select("id, name").in_("name", item_names).execute()
+        
+        # Создаем быстрый словарь { "Название": ID }
+        name_to_id = {row['name']: row['id'] for row in res.data}
+
+        # 4. Формируем список инвентаря для массовой вставки
+        user_items_data = [
+            {
+                "chat_id": chat_id,
+                "item_id": name_to_id[name],
+                "amount": count
+            }
+            for name, count in items_counts.items() if name in name_to_id
+        ]
+
+        # 5. Очищаем старый инвентарь и записываем новый (2 запроса вместо 200)
+        supabase.table("user_items").delete().eq("chat_id", chat_id).execute()
+        if user_items_data:
+            supabase.table("user_items").insert(user_items_data).execute()
+
+        logger.info(f"✅ Инвентарь пользователя {chat_id} успешно сохранен (Bulk).")
+    except Exception as e:
+        logger.error(f"Ошибка массовой вставки в Supabase: {e}")
 
 # === КЛАВИАТУРЫ ===
 def get_main_menu_kb():
