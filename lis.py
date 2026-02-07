@@ -98,7 +98,7 @@ async def get_ctx_val(ctx_id: int) -> str:
         return row[0] if row else None
 
 async def get_inventory_data_link(chat_id):
-    """Подготовка ссылки для Mini App (No-IP метод)"""
+    """Подготовка максимально сжатой ссылки для Mini App"""
     async with aiosqlite.connect(DB_PATH) as db:
         query = """
             SELECT i.name, ui.amount, i.category 
@@ -109,8 +109,11 @@ async def get_inventory_data_link(chat_id):
             rows = await cursor.fetchall()
             if not rows: return None
             
-            data = [{"n": r[0], "a": r[1], "c": r[2]} for r in rows]
+            # Используем список списков [имя, кол-во, категория] для экономии места в URL
+            data = [[r[0], r[1], r[2]] for r in rows]
             json_str = json.dumps(data, ensure_ascii=False)
+            
+            # Кодируем в base64
             encoded = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
             return f"{WEB_APP_URL}#data={encoded}"
 
@@ -325,10 +328,12 @@ async def show_mini_app_choice(m: Message):
     link = await get_inventory_data_link(m.chat.id)
     if not link:
         return await m.answer("❌ Инвентарь пуст. Сначала привяжи профиль Steam.")
+    
+    # Отправляем сообщение с инлайн-кнопкой, в которой зашита уникальная ссылка с данными
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Открыть визуальный инвентарь 🚀", web_app=WebAppInfo(url=link))
     ]])
-    await m.answer("Нажми кнопку ниже для перехода в Mini App:", reply_markup=kb)
+    await m.answer("Нажми кнопку ниже для перехода в Mini App (актуально для вашего текущего инвентаря):", reply_markup=kb)
 
 @dp.message(F.text == "🔫 Оружие")
 async def show_weapon_shortcut(m: Message, state: FSMContext):
