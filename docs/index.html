@@ -46,6 +46,7 @@
         .item-amount { font-weight: bold; color: var(--accent-color); font-size: 16px; }
 
         #loader { text-align: center; margin-top: 50px; color: var(--tg-theme-hint-color); }
+        .error-msg { color: #ff4d4d; text-align: center; padding: 20px; }
         .empty-state { text-align: center; margin-top: 100px; color: var(--tg-theme-hint-color); }
     </style>
 </head>
@@ -59,26 +60,31 @@
     <div id="inventory-list"></div>
 
     <script>
-        // Инициализация Telegram
         const tg = window.Telegram.WebApp;
-        tg.expand(); // Разворачиваем приложение
+        tg.expand();
 
-        // Конфигурация Supabase
         const SUPABASE_URL = 'https://trufweyemrkdogsszike.supabase.co';
         const SUPABASE_KEY = 'sb_publishable_Ywujm6u8WqyG9Y4K5ANOsA_E8umiZqc';
-        const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        // ИСПРАВЛЕНО: переименовали переменную, чтобы не было конфликта с библиотекой
+        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
         async function loadInventory() {
             const user = tg.initDataUnsafe?.user;
-            const userId = user?.id || 12345678; // 12345678 для тестов в браузере
+            // Берем реальный ID из Телеграма
+            const userId = user?.id; 
 
             if (user) {
                 document.getElementById('user-name').innerText = `Инвентарь ${user.first_name}`;
             }
 
+            if (!userId) {
+                document.getElementById('loader').innerHTML = '<div class="error-msg">Ошибка: ID пользователя не получен из Telegram</div>';
+                return;
+            }
+
             try {
-                // Запрос к Supabase с JOIN таблицы items
-                const { data, error } = await supabase
+                const { data, error } = await supabaseClient
                     .from('user_items')
                     .select(`
                         amount,
@@ -93,24 +99,31 @@
                 loader.style.display = 'none';
 
                 if (!data || data.length === 0) {
-                    listContainer.innerHTML = '<div class="empty-state">У вас пока нет предметов в базе. Отправьте ссылку на Steam боту!</div>';
+                    listContainer.innerHTML = `
+                        <div class="empty-state">
+                            У вас пока нет предметов в базе для ID: ${userId}.<br>
+                            Сначала обновите инвентарь через бота!
+                        </div>`;
                     return;
                 }
 
-                // Рендерим карточки
                 listContainer.innerHTML = data.map(row => `
                     <div class="item-card">
                         <div class="item-info">
-                            <span class="item-name">${row.items.name}</span>
-                            <span class="item-category">${row.items.category}</span>
+                            <span class="item-name">${row.items?.name || 'Неизвестный предмет'}</span>
+                            <span class="item-category">${row.items?.category || 'Без категории'}</span>
                         </div>
                         <div class="item-amount">x${row.amount}</div>
                     </div>
                 `).join('');
 
             } catch (err) {
-                console.error(err);
-                document.getElementById('loader').innerText = 'Ошибка загрузки данных.';
+                console.error("Ошибка Supabase:", err);
+                document.getElementById('loader').innerHTML = `
+                    <div class="error-msg">
+                        Ошибка загрузки: ${err.message}<br>
+                        <small>Проверь, отключен ли RLS в Supabase!</small>
+                    </div>`;
             }
         }
 
