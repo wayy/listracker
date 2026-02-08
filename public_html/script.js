@@ -1,6 +1,6 @@
 // ВАЖНО: Укажите здесь URL вашего бэкенда (например, через ngrok или реальный домен)
 // Если тестируете локально, Mini App не сможет достучаться до localhost без туннеля (из-за HTTPS на GitHub Pages)
-const API_BASE_URL = 'https://YOUR_DOMAIN_OR_NGROK.com'; 
+const API_BASE_URL = 'https://prxnone.bothost.ru'; 
 
 const tg = window.Telegram.WebApp;
 tg.expand();
