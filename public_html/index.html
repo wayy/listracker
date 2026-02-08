@@ -1,1 +1,46 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CS2 Inventory</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <div id="loader" class="screen active">
+            <div class="spinner"></div>
+            <p>Загрузка инвентаря...</p>
+        </div>
 
+        <div id="categories-screen" class="screen">
+            <h2>Ваш Инвентарь</h2>
+            <div id="categories-list" class="grid-container"></div>
+        </div>
+
+        <div id="items-screen" class="screen">
+            <button class="back-btn" onclick="showCategories()">← Назад</button>
+            <h3 id="category-title"></h3>
+            <div id="items-list" class="grid-container"></div>
+            <div class="pagination">
+                <button id="prev-page" disabled>Назад</button>
+                <span id="page-indicator">1</span>
+                <button id="next-page">Вперёд</button>
+            </div>
+        </div>
+
+        <div id="item-modal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeModal()">&times;</span>
+                <img id="modal-img" src="" alt="">
+                <h3 id="modal-title"></h3>
+                <p id="modal-price">Загрузка цены...</p>
+                <button id="track-btn" class="action-btn">Отслеживать</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
