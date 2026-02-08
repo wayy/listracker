@@ -1,5 +1,5 @@
 const tg = window.Telegram.WebApp;
-const chatId = tg.initDataUnsafe?.user?.id;
+const userId = tg.initDataUnsafe?.user?.id ?? tg.initDataUnsafe?.user_id;
 
 const categoriesEl = document.getElementById('categories');
 const itemsListEl = document.getElementById('items-list');
@@ -40,8 +40,8 @@ function setEmptyState(visible, message) {
 }
 
 async function loadCats() {
-    if (!chatId) {
-        tg.showAlert('Не удалось определить Telegram ID.');
+    if (!userId) {
+        tg.showAlert('Не удалось определить Telegram user id.');
         setStatus('Ошибка', false);
         return;
     }
@@ -51,7 +51,7 @@ async function loadCats() {
     setError('');
     setEmptyState(false);
 
-    const res = await fetch(`/api/categories?chat_id=${chatId}`);
+    const res = await fetch(`/api/categories?chat_id=${userId}`);
     const data = await res.json();
 
     if (!res.ok) {
@@ -95,7 +95,7 @@ async function loadItems() {
     setEmptyState(false);
     prevBtnEl.disabled = page === 0;
 
-    const res = await fetch(`/api/items?chat_id=${chatId}&category=${encodeURIComponent(currentCat)}&page=${page}`);
+    const res = await fetch(`/api/items?chat_id=${userId}&category=${encodeURIComponent(currentCat)}&page=${page}`);
     const items = await res.json();
 
     pageNumEl.innerText = `Стр. ${page + 1}`;
@@ -127,7 +127,7 @@ async function showPrice(name) {
     modalPriceEl.innerText = '⏳ Загрузка...';
     trackBtnEl.disabled = true;
 
-    const res = await fetch(`/api/get-price?name=${encodeURIComponent(name)}&chat_id=${chatId}`);
+    const res = await fetch(`/api/get-price?name=${encodeURIComponent(name)}&chat_id=${userId}`);
     const data = await res.json();
 
     if (!res.ok) {
@@ -150,7 +150,7 @@ async function toggleTrack() {
     const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, name: selected })
+        body: JSON.stringify({ chat_id: userId, name: selected })
     });
 
     if (res.ok) {
