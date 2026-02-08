@@ -1,5 +1,22 @@
 const tg = window.Telegram.WebApp;
-const userId = tg.initDataUnsafe?.user?.id ?? tg.initDataUnsafe?.user_id;
+
+function extractUserId() {
+    const directId = tg.initDataUnsafe?.user?.id ?? tg.initDataUnsafe?.user_id;
+    if (directId) return directId;
+    const initData = tg.initData;
+    if (!initData) return null;
+    try {
+        const params = new URLSearchParams(initData);
+        const userParam = params.get('user');
+        if (!userParam) return null;
+        const user = JSON.parse(decodeURIComponent(userParam));
+        return user?.id ?? null;
+    } catch (error) {
+        return null;
+    }
+}
+
+const userId = extractUserId();
 
 const categoriesEl = document.getElementById('categories');
 const itemsListEl = document.getElementById('items-list');
@@ -41,7 +58,7 @@ function setEmptyState(visible, message) {
 
 async function loadCats() {
     if (!userId) {
-        tg.showAlert('Не удалось определить Telegram user id.');
+        tg.showAlert('Не удалось определить Telegram user id. Откройте Mini App через Telegram.');
         setStatus('Ошибка', false);
         return;
     }
