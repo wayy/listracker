@@ -9,7 +9,7 @@ require('dotenv').config();
 // КОНФИГУРАЦИЯ
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBAPP_URL = process.env.WEBAPP_URL;
-const PORT = process.env.PORT || 3000; // Вернул порт 3000 по просьбе пользователя
+const PORT = process.env.PORT || 3030; // Вернул порт 3000 по просьбе пользователя
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
