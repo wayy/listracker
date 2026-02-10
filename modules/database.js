@@ -26,8 +26,8 @@ db.serialize(() => {
         telegram_user_id INTEGER,
         market_hash_name TEXT,
         category TEXT,
-        current_price REAL,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        type TEXT,
+        image TEXT,
         PRIMARY KEY (telegram_user_id, market_hash_name) 
     )`);
 });
@@ -43,10 +43,19 @@ module.exports = {
     },
     saveUser: (tgId, steamId, username) => {
         return new Promise((resolve, reject) => {
-            db.run(`INSERT OR REPLACE INTO users (telegram_user_id, steam_id, username) VALUES (?, ?, ?)`, 
+            db.run(`INSERT OR REPLACE INTO users (telegram_user_id, steam_id, username) VALUES (?, ?, ?)`,
                 [tgId, steamId, username], (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+        });
+    },
+    // Получение кешированного инвентаря
+    getCachedInventory: (tgId) => {
+        return new Promise((resolve, reject) => {
+            db.all("SELECT market_hash_name as name, market_hash_name, category, type, image FROM user_items WHERE telegram_user_id = ?", [tgId], (err, rows) => {
                 if (err) reject(err);
-                else resolve();
+                else resolve(rows);
             });
         });
     },
@@ -55,23 +64,23 @@ module.exports = {
         return new Promise((resolve, reject) => {
             db.serialize(() => {
                 db.run("BEGIN TRANSACTION");
-                
+
                 // Удаляем старые записи
                 db.run("DELETE FROM user_items WHERE telegram_user_id = ?", [tgId]);
-                
+
                 // Вставляем новые
-                const stmt = db.prepare("INSERT INTO user_items (telegram_user_id, market_hash_name, category) VALUES (?, ?, ?)");
+                const stmt = db.prepare("INSERT INTO user_items (telegram_user_id, market_hash_name, category, type, image) VALUES (?, ?, ?, ?, ?)");
                 for (const item of items) {
                     // Простая логика категории для БД: берем часть до " | "
-                    let category = item.name.split(' | ')[0]; 
+                    let category = (item.name || '').split(' | ')[0];
                     if (category.includes('Sticker')) category = 'Stickers';
                     if (category.includes('Case')) category = 'Cases';
                     if (category.includes('Graffiti')) category = 'Graffiti';
 
-                    stmt.run(tgId, item.market_hash_name, category);
+                    stmt.run(tgId, item.market_hash_name, category, item.type, item.image);
                 }
                 stmt.finalize();
-                
+
                 db.run("COMMIT", (err) => {
                     if (err) reject(err);
                     else resolve();
@@ -87,7 +96,7 @@ module.exports = {
                 if (err) {
                     return reject(err);
                 }
-                
+
                 const trackedNames = new Set(rows.map(r => r.market_hash_name));
                 const currentNames = new Set(currentItemNames);
                 const toRemove = [];
@@ -106,9 +115,9 @@ module.exports = {
                     const params = [tgId, ...toRemove];
 
                     db.run(sql, params, (err) => {
-                            if (err) reject(err);
-                            else resolve(toRemove); // Возвращаем список удаленных
-                        }
+                        if (err) reject(err);
+                        else resolve(toRemove); // Возвращаем список удаленных
+                    }
                     );
                 } else {
                     resolve([]);
@@ -124,10 +133,10 @@ module.exports = {
                     resolve({ status: 'already_tracked' });
                 } else {
                     db.run(`INSERT INTO tracking (telegram_user_id, market_hash_name, start_price, last_price, currency) VALUES (?, ?, ?, ?, ?)`,
-                        [tgId, hashName, price, price, currency], function(err) {
-                        if (err) reject(err);
-                        else resolve({ status: 'success', id: this.lastID });
-                    });
+                        [tgId, hashName, price, price, currency], function (err) {
+                            if (err) reject(err);
+                            else resolve({ status: 'success', id: this.lastID });
+                        });
                 }
             });
         });
@@ -142,7 +151,7 @@ module.exports = {
     },
     getTrackedItemsForUser: (tgId) => {
         return new Promise((resolve, reject) => {
-             db.all("SELECT market_hash_name FROM tracking WHERE telegram_user_id = ?", [tgId], (err, rows) => {
+            db.all("SELECT market_hash_name FROM tracking WHERE telegram_user_id = ?", [tgId], (err, rows) => {
                 if (err) reject(err);
                 else resolve(rows.map(r => r.market_hash_name));
             });
