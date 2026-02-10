@@ -122,14 +122,23 @@ async function loadInventory() {
         console.error("Inventory load error:", e);
         let errorMsg = e.message;
         if (errorMsg === 'Failed to fetch') {
-            errorMsg = `Не удалось подключиться к серверу по адресу:<br><b>${API_BASE_URL}</b><br><br><small>Убедитесь, что сервер запущен и доступен по HTTPS.</small>`;
+            errorMsg = `
+                <div style="text-align:left;">
+                <b>Ошибка сети (Failed to fetch)</b><br>
+                По адресу: <code>${API_BASE_URL}</code><br><br>
+                Возможные причины:<br>
+                1. Сервер не запущен на Bothost.<br>
+                2. Блокировка CORS (проверьте консоль).<br>
+                3. Проблема с SSL-сертификатом.<br>
+                4. Ссылка в <code>script.js</code> не совпадает с реальностью.
+                </div>
+            `;
         }
 
         document.getElementById('loader').innerHTML = `
             <p style="color:#ff6b6b; font-weight:bold;">Ошибка загрузки данных:</p>
-            <p style="font-size:14px; color:#eee; background:rgba(255,0,0,0.1); padding:10px; border-radius:5px;">${errorMsg}</p>
-            <br>
-            <p style="font-size:12px; color:#aaa;">Если вы видите ошибку "is not a function", обязательно <b>перезапустите в консоли</b> файл <code>app.js</code>.</p>
+            <div style="font-size:14px; color:#eee; background:rgba(255,0,0,0.1); padding:10px; border-radius:5px; margin-bottom:10px;">${errorMsg}</div>
+            <p style="font-size:11px; color:#888;">Debug: ${e.stack ? e.stack.split('\n')[0] : e.message}</p>
             <br>
             <button onclick="location.reload()" class="action-btn">Повторить</button>
         `;
