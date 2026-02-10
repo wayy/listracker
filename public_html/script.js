@@ -2,9 +2,7 @@
 // Если тестируете локально, Mini App не сможет достучаться до localhost без туннеля (из-за HTTPS на GitHub Pages)
 const API_BASE_URL = 'https://prxnone.bothost.ru';
 
-const tg = window.Telegram.WebApp;
-tg.expand();
-
+// Переменные
 let inventory = [];
 let categories = {};
 let currentCategory = null;
@@ -13,14 +11,23 @@ const ITEMS_PER_PAGE = 10;
 let userTgId = null;
 let trackedItems = new Set(); // Set of market_hash_names
 
-// Инициализация
+// Глобальная переменная для доступа к TG API
+window.tg = null;
+
 // Инициализация
 document.addEventListener('DOMContentLoaded', async () => {
     try {
+        // Попытка инициализации Telegram WebApp
+        if (window.Telegram && window.Telegram.WebApp) {
+            window.tg = window.Telegram.WebApp;
+            window.tg.expand();
+        }
+
         // Получаем ID пользователя из initData
-        if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
-            userTgId = tg.initDataUnsafe.user.id;
+        if (window.tg && window.tg.initDataUnsafe && window.tg.initDataUnsafe.user) {
+            userTgId = window.tg.initDataUnsafe.user.id;
             document.getElementById('loader').innerHTML = '<div class="spinner"></div><p>Загрузка данных...</p><br><small>ID: ' + userTgId + '</small>';
+
             await loadTrackedItems();
             loadInventory();
         } else {
@@ -33,7 +40,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 await loadTrackedItems();
                 loadInventory();
             } else {
-                document.getElementById('loader').innerHTML = '<p style="color:red">Ошибка: Не удалось определить пользователя.<br>Запустите через Telegram.</p>';
+                if (!window.tg) {
+                    document.getElementById('loader').innerHTML = '<p style="color:red">Ошибка: Telegram WebApp не найден.<br>Запустите через Telegram.</p>';
+                } else {
+                    document.getElementById('loader').innerHTML = '<p style="color:red">Ошибка: Не удалось определить пользователя.<br>Запустите через Telegram.</p>';
+                }
             }
         }
     } catch (e) {
@@ -218,17 +229,22 @@ async function trackItem(item, price, priceText) {
         const result = await res.json();
 
         if (result.status === 'success' || result.status === 'already_tracked') {
-            tg.showAlert(`Отслеживание начато!\nБазовая цена: ${priceText}`);
+            const msg = `Отслеживание начато!\nБазовая цена: ${priceText}`;
+            if (window.tg) window.tg.showAlert(msg);
+            else alert(msg);
+
             trackedItems.add(item.market_hash_name);
             closeModal();
             renderItems(); // Обновить иконки
         } else {
-            tg.showAlert('Ошибка сервера.');
+            if (window.tg) window.tg.showAlert('Ошибка сервера.');
+            else alert('Ошибка сервера.');
         }
     } catch (e) {
-        tg.showAlert('Ошибка связи с сервером.');
+        if (window.tg) window.tg.showAlert('Ошибка связи с сервером.');
+        else alert('Ошибка связи с сервером.');
     }
-    // Кнопку не включаем, так как модалка закрывается. Если ошибка — она останется выключенной пока юзер не переоткроет, или можно разблокировать.
+    // Кнопку не включаем, так как модалка закрывается.
     if (document.getElementById('item-modal').style.display !== 'none') {
         btn.disabled = false;
         btn.textContent = 'Отслеживать';
@@ -252,15 +268,19 @@ async function untrackItem(item) {
         const result = await res.json();
 
         if (result.status === 'success') {
-            tg.showAlert('Отслеживание остановлено.');
+            if (window.tg) window.tg.showAlert('Отслеживание остановлено.');
+            else alert('Отслеживание остановлено.');
+
             trackedItems.delete(item.market_hash_name);
             closeModal();
             renderItems(); // Обновить иконки
         } else {
-            tg.showAlert('Ошибка сервера.');
+            if (window.tg) window.tg.showAlert('Ошибка сервера.');
+            else alert('Ошибка сервера.');
         }
     } catch (e) {
-        tg.showAlert('Ошибка связи с сервером.');
+        if (window.tg) window.tg.showAlert('Ошибка связи с сервером.');
+        else alert('Ошибка связи с сервером.');
     }
 
     if (document.getElementById('item-modal').style.display !== 'none') {
