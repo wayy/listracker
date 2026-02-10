@@ -1,5 +1,4 @@
 // ВАЖНО: Укажите здесь URL вашего бэкенда (например, через ngrok или реальный домен)
-// Если тестируете локально, Mini App не сможет достучаться до localhost без туннеля (из-за HTTPS на GitHub Pages)
 const API_BASE_URL = 'https://prxnone.bothost.ru';
 
 // Переменные
@@ -24,39 +23,69 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         // Получаем ID пользователя из initData
-        if (window.tg && window.tg.initDataUnsafe && window.tg.initDataUnsafe.user) {
-            userTgId = window.tg.initDataUnsafe.user.id;
-            document.getElementById('loader').innerHTML = '<div class="spinner"></div><p>Загрузка данных...</p><br><small>ID: ' + userTgId + '</small>';
+        if (window.tg) {
+            const unsafe = window.tg.initDataUnsafe;
 
-            await loadTrackedItems();
-            loadInventory();
+            // Расширенная диагностика если user пустой
+            const debugInfo = `
+                <div style="font-size:10px; color: #888; text-align:left; margin-top:10px; border-top:1px solid #444; padding-top:5px;">
+                Platform: ${window.tg.platform}<br>
+                Version: ${window.tg.version}<br>
+                InitData: ${window.tg.initData ? 'Yes (Length: ' + window.tg.initData.length + ')' : 'No'}<br>
+                User: ${unsafe && unsafe.user ? 'Found (ID: ' + unsafe.user.id + ')' : 'NOT FOUND'}
+                </div>
+            `;
+
+            if (unsafe && unsafe.user) {
+                userTgId = unsafe.user.id;
+                document.getElementById('loader').innerHTML = `
+                    <div class="spinner"></div>
+                    <p>Загрузка инвентаря...</p>
+                    <small style="color:#aaa">ID: ${userTgId}</small>
+                `;
+
+                await loadTrackedItems();
+                loadInventory();
+            } else {
+                // Если user не найден, пробуем поискать в URL (на случай если мы прокинули его вручную)
+                const urlParams = new URLSearchParams(window.location.search);
+                const queryTgId = urlParams.get('tg_id');
+
+                if (queryTgId) {
+                    userTgId = queryTgId;
+                    await loadTrackedItems();
+                    loadInventory();
+                } else {
+                    document.getElementById('loader').innerHTML = `
+                        <p style="color:#ff6b6b; font-weight:bold;">Ошибка: Пользователь не определен</p>
+                        <p style="font-size:12px">Пожалуйста, откройте приложение через кнопку меню в боте.</p>
+                        ${debugInfo}
+                    `;
+                }
+            }
         } else {
-            // Fallback for testing without Telegram environment
+            // Режим разработки в браузере
             const urlParams = new URLSearchParams(window.location.search);
             const debugTgId = urlParams.get('tg_id');
             if (debugTgId) {
                 userTgId = debugTgId;
-                document.getElementById('loader').innerHTML = '<div class="spinner"></div><p>Режим отладки...</p><br><small>ID: ' + userTgId + '</small>';
+                document.getElementById('loader').innerHTML = '<div class="spinner"></div><p>Режим разработки...</p>';
                 await loadTrackedItems();
                 loadInventory();
             } else {
-                if (!window.tg) {
-                    document.getElementById('loader').innerHTML = '<p style="color:red">Ошибка: Telegram WebApp не найден.<br>Запустите через Telegram.</p>';
-                } else {
-                    document.getElementById('loader').innerHTML = '<p style="color:red">Ошибка: Не удалось определить пользователя.<br>Запустите через Telegram.</p>';
-                }
+                document.getElementById('loader').innerHTML = '<p style="color:#ff6b6b">Ошибка: Telegram WebApp не найден.</p>';
             }
         }
     } catch (e) {
-        alert('Global Error: ' + e.message);
-        document.body.innerHTML = '<p style="color:red; padding: 20px;">CRITICAL ERROR: ' + e.message + '</p>';
+        console.error('Initial error:', e);
+        document.getElementById('loader').innerHTML = `<p style="color:red">Ошибка инициализации:<br>${e.message}</p>`;
     }
 });
 
 async function loadTrackedItems() {
     try {
         const response = await fetch(`${API_BASE_URL}/api/tracked?tg_id=${userTgId}`);
-        if (!response.ok) throw new Error('API Error: ' + response.status);
+        if (!response.ok) throw new Error('Status: ' + response.status);
         const data = await response.json();
         if (data.tracked) {
             trackedItems = new Set(data.tracked);
@@ -79,23 +108,72 @@ async function loadInventory() {
         renderCategories();
         switchScreen('categories-screen');
     } catch (e) {
-        document.getElementById('loader').innerHTML = `<p style="color:red">Ошибка загрузки инвентаря:<br>${e.message}</p><br><button onclick="location.reload()" class="action-btn">Повторить</button>`;
+        document.getElementById('loader').innerHTML = `
+            <p style="color:#ff6b6b">Ошибка загрузки данных:<br>${e.message}</p>
+            <br>
+            <button onclick="location.reload()" class="action-btn">Повторить</button>
+        `;
     }
 }
 
-// Группировка по категориям (на основе имени)
+// Группировка по крупным категориям (как на скриншоте пользователя)
 function processCategories() {
-    categories = {};
-    inventory.forEach(item => {
-        // Логика выделения категории: берем часть до " | " или первое слово
-        let catName = item.name.split(' | ')[0];
-        if (catName.includes('Sticker')) catName = 'Stickers';
-        if (catName.includes('Case')) catName = 'Cases';
-        if (catName.includes('Graffiti')) catName = 'Graffiti';
+    categories = {
+        'Оружие': [],
+        'Наклейки': [],
+        'Кейсы': [],
+        'Граффити': [],
+        'Музыка': [],
+        'Агенты': [],
+        'Прочее': []
+    };
 
-        if (!categories[catName]) categories[catName] = [];
-        categories[catName].push(item);
+    inventory.forEach(item => {
+        const type = (item.type || '').toLowerCase();
+        const name = (item.name || '').toLowerCase();
+
+        if (name.includes('graffiti')) {
+            categories['Граффити'].push(item);
+        } else if (name.includes('sticker')) {
+            categories['Наклейки'].push(item);
+        } else if (name.includes('music kit')) {
+            categories['Музыка'].push(item);
+        } else if (type.includes('agent') || type.includes('агент')) {
+            categories['Агенты'].push(item);
+        } else if (type.includes('case') || type.includes('container') || type.includes('кейс') || type.includes('ящик')) {
+            categories['Кейсы'].push(item);
+        } else if (
+            type.includes('pistol') || type.includes('rifle') || type.includes('sniper') ||
+            type.includes('smg') || type.includes('shotgun') || type.includes('machinegun') ||
+            type.includes('knife') || type.includes('gloves') || type.includes('оруж') ||
+            type.includes('автомат') || type.includes('пистолет') || type.includes('нож')
+        ) {
+            categories['Оружие'].push(item);
+        } else {
+            categories['Прочее'].push(item);
+        }
     });
+
+    // Удаляем пустые категории
+    for (const key in categories) {
+        if (categories[key].length === 0) {
+            delete categories[key];
+        }
+    }
+}
+
+// Иконки для категорий (Emoji или картинка первого предмета)
+function getCategoryIcon(catName) {
+    const icons = {
+        'Граффити': '🎨',
+        'Наклейки': '🎯',
+        'Музыка': '🎵',
+        'Агенты': '👤',
+        'Кейсы': '📦',
+        'Оружие': '🔫',
+        'Прочее': '🛠️'
+    };
+    return icons[catName] || '📂';
 }
 
 function renderCategories() {
@@ -105,10 +183,10 @@ function renderCategories() {
     Object.keys(categories).sort().forEach(cat => {
         const div = document.createElement('div');
         div.className = 'card';
-        // Берем иконку первого предмета как иконку категории
         div.innerHTML = `
-            <img src="${categories[cat][0].image}" alt="${cat}">
-            <div class="card-title">${cat} (${categories[cat].length})</div>
+            <div style="font-size: 40px; margin-bottom: 10px;">${getCategoryIcon(cat)}</div>
+            <div class="card-title">${cat}</div>
+            <div style="font-size: 12px; color: #888;">${categories[cat].length} поз.</div>
         `;
         div.onclick = () => openCategory(cat);
         list.appendChild(div);
@@ -135,7 +213,6 @@ function renderItems() {
     pageItems.forEach(item => {
         const div = document.createElement('div');
         div.className = 'card';
-        // Добавляем маркер если отслеживается
         const isTracked = trackedItems.has(item.market_hash_name);
         div.innerHTML = `
             <img src="${item.image}" alt="${item.name}">
@@ -145,7 +222,6 @@ function renderItems() {
         list.appendChild(div);
     });
 
-    // Пагинация
     document.getElementById('page-indicator').textContent = currentPage;
     document.getElementById('prev-page').disabled = currentPage === 1;
     document.getElementById('next-page').disabled = end >= items.length;
@@ -165,17 +241,13 @@ async function openItemModal(item) {
     priceEl.textContent = 'Загрузка цены...';
     btn.disabled = true;
 
-    // Сброс обработчиков (чтобы не дублировались)
     let newBtn = btn.cloneNode(true);
     btn.parentNode.replaceChild(newBtn, btn);
-    newBtn = document.getElementById('track-btn'); // Refresh reference
+    newBtn = document.getElementById('track-btn');
 
     const isTracked = trackedItems.has(item.market_hash_name);
-
-    // Начальное состояние кнопки
     updateModalButton(newBtn, isTracked, item, null, null);
 
-    // Запрос цены
     try {
         const res = await fetch(`${API_BASE_URL}/api/price?name=${encodeURIComponent(item.market_hash_name)}`);
         const data = await res.json();
@@ -183,8 +255,6 @@ async function openItemModal(item) {
         if (data.price) {
             priceEl.textContent = `Цена: ${data.text}`;
             newBtn.disabled = false;
-
-            // Обновляем кнопку с полученной ценой
             updateModalButton(newBtn, isTracked, item, data.price, data.text);
         } else {
             priceEl.textContent = 'Не удалось получить цену';
@@ -223,7 +293,7 @@ async function trackItem(item, price, priceText) {
                 tg_id: userTgId,
                 name: item.market_hash_name,
                 price: price,
-                currency: priceText.replace(/[\d.,\s]/g, '') // Пытаемся вычленить валюту
+                currency: priceText.replace(/[\d.,\s]/g, '')
             })
         });
         const result = await res.json();
@@ -235,7 +305,7 @@ async function trackItem(item, price, priceText) {
 
             trackedItems.add(item.market_hash_name);
             closeModal();
-            renderItems(); // Обновить иконки
+            renderItems();
         } else {
             if (window.tg) window.tg.showAlert('Ошибка сервера.');
             else alert('Ошибка сервера.');
@@ -244,7 +314,6 @@ async function trackItem(item, price, priceText) {
         if (window.tg) window.tg.showAlert('Ошибка связи с сервером.');
         else alert('Ошибка связи с сервером.');
     }
-    // Кнопку не включаем, так как модалка закрывается.
     if (document.getElementById('item-modal').style.display !== 'none') {
         btn.disabled = false;
         btn.textContent = 'Отслеживать';
@@ -273,7 +342,7 @@ async function untrackItem(item) {
 
             trackedItems.delete(item.market_hash_name);
             closeModal();
-            renderItems(); // Обновить иконки
+            renderItems();
         } else {
             if (window.tg) window.tg.showAlert('Ошибка сервера.');
             else alert('Ошибка сервера.');
