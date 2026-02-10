@@ -9,13 +9,25 @@ require('dotenv').config();
 // КОНФИГУРАЦИЯ
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBAPP_URL = process.env.WEBAPP_URL;
-const PORT = process.env.PORT || 3030; // Вернул порт 3000 по просьбе пользователя
+const PORT = process.env.PORT || 3000; // Вернул порт 3000 по просьбе пользователя
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+// Логирование всех запросов для отладки
+app.use((req, res, next) => {
+    console.log(`[DEBUG] ${new Date().toISOString()} ${req.method} ${req.url}`);
+    console.log(`[DEBUG] Origin: ${req.headers.origin}`);
+    next();
+});
+
+// Проверка работоспособности
+app.get('/', (req, res) => {
+    res.send('CS2 Tracker Backend is running! 🚀');
+});
 
 // --- ЛОГИКА БОТА ---
 
