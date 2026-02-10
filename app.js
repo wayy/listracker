@@ -51,7 +51,7 @@ bot.on('text', async (ctx) => {
             await ctx.reply(
                 "Профиль привязан! Теперь ты можешь открыть инвентарь.",
                 Markup.keyboard([
-                    Markup.button.webApp("📦 Инвентарь CS2", WEBAPP_URL)
+                    Markup.button.webApp("📦 Инвентарь CS2", `${WEBAPP_URL}?tg_id=${ctx.from.id}`)
                 ]).resize()
             );
 
