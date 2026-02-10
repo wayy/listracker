@@ -31,8 +31,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 <div style="font-size:10px; color: #888; text-align:left; margin-top:10px; border-top:1px solid #444; padding-top:5px;">
                 Platform: ${window.tg.platform}<br>
                 Version: ${window.tg.version}<br>
-                InitData: ${window.tg.initData ? 'Yes (Length: ' + window.tg.initData.length + ')' : 'No'}<br>
-                User: ${unsafe && unsafe.user ? 'Found (ID: ' + unsafe.user.id + ')' : 'NOT FOUND'}
+                InitData: ${window.tg.initData ? 'Yes' : 'No'}<br>
+                URL: ${window.location.search}<br>
+                Hash: ${window.location.hash ? 'Yes' : 'No'}<br>
+                User: ${unsafe && unsafe.user ? 'Found' : 'NOT FOUND'}
                 </div>
             `;
 
