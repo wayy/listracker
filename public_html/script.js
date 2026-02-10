@@ -15,10 +15,11 @@ let trackedItems = new Set(); // Set of market_hash_names
 
 // Инициализация
 document.addEventListener('DOMContentLoaded', async () => {
-    // Получаем ID пользователя из initData (безопаснее через валидацию на бэке, но для ТЗ берем так)
+    // Получаем ID пользователя из initData
     if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
         userTgId = tg.initDataUnsafe.user.id;
-        await loadTrackedItems(); // Сначала загружаем отслеживаемые
+        document.getElementById('loader').innerHTML = '<div class="spinner"></div><p>Загрузка данных...</p><br><small>ID: ' + userTgId + '</small>';
+        await loadTrackedItems();
         loadInventory();
     } else {
         // Fallback for testing without Telegram environment
@@ -26,10 +27,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         const debugTgId = urlParams.get('tg_id');
         if (debugTgId) {
             userTgId = debugTgId;
+            document.getElementById('loader').innerHTML = '<div class="spinner"></div><p>Режим отладки...</p><br><small>ID: ' + userTgId + '</small>';
             await loadTrackedItems();
             loadInventory();
         } else {
-            document.getElementById('loader').innerHTML = '<p>Ошибка: Запустите через Telegram</p>';
+            document.getElementById('loader').innerHTML = '<p style="color:red">Ошибка: Не удалось определить пользователя.<br>Запустите через Telegram.</p>';
         }
     }
 });
@@ -37,6 +39,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function loadTrackedItems() {
     try {
         const response = await fetch(`${API_BASE_URL}/api/tracked?tg_id=${userTgId}`);
+        if (!response.ok) throw new Error('API Error: ' + response.status);
         const data = await response.json();
         if (data.tracked) {
             trackedItems = new Set(data.tracked);
@@ -59,7 +62,7 @@ async function loadInventory() {
         renderCategories();
         switchScreen('categories-screen');
     } catch (e) {
-        document.getElementById('loader').innerHTML = `<p style="color:red">Ошибка: ${e.message}</p>`;
+        document.getElementById('loader').innerHTML = `<p style="color:red">Ошибка загрузки инвентаря:<br>${e.message}</p><br><button onclick="location.reload()" class="action-btn">Повторить</button>`;
     }
 }
 
