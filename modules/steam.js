@@ -1,28 +1,32 @@
 const axios = require('axios');
-const cheerio = require('cheerio');
 
-const STEAM_INVENTORY_URL = (steamId) => `https://steamcommunity.com/inventory/${steamId}/730/2?l=russian&count=5000`;
+const HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+};
+
+const STEAM_INVENTORY_URL = (steamId) => `https://steamcommunity.com/inventory/${steamId}/730/2?l=russian&count=2000`;
 const STEAM_PRICE_URL = (hashName) => `https://steamcommunity.com/market/priceoverview/?appid=730&currency=5&market_hash_name=${encodeURIComponent(hashName)}`;
 
 module.exports = {
     // Получение SteamID64 из ссылки
     resolveSteamID: async (url) => {
-        // Очистка URL
         url = url.replace(/\/$/, '');
-
         if (url.includes('/profiles/')) {
             const match = url.match(/profiles\/(\d+)/);
             return match ? match[1] : null;
         } else if (url.includes('/id/')) {
             try {
-                const response = await axios.get(url);
-                const $ = cheerio.load(response.data);
-                // Steam хранит ID в переменной g_rgProfileData в скриптах
-                const html = $.html();
-                const match = html.match(/"steamid":"(\d+)"/);
-                return match ? match[1] : null;
+                // Пытаемся получить XML версию для точного ID как в примере
+                const response = await axios.get(`${url}/?xml=1`, { headers: HEADERS });
+                const match = response.data.match(/<steamID64>(\d+)<\/steamID64>/);
+                if (match) return match[1];
+
+                // Fallback на обычный HTML
+                const htmlResponse = await axios.get(url, { headers: HEADERS });
+                const htmlMatch = htmlResponse.data.match(/"steamid":"(\d+)"/);
+                return htmlMatch ? htmlMatch[1] : null;
             } catch (e) {
-                console.error("Error parsing profile:", e.message);
+                console.error("Error resolving SteamID:", e.message);
                 return null;
             }
         }
@@ -33,36 +37,24 @@ module.exports = {
     getInventory: async (steamId) => {
         try {
             const url = STEAM_INVENTORY_URL(steamId);
-            console.log(`Fetching inventory from: ${url}`);
-            const response = await axios.get(url);
+            console.log(`[STEAM] Fetching inventory: ${url}`);
+
+            const response = await axios.get(url, { headers: HEADERS, timeout: 20000 });
             const data = response.data;
 
             if (!data || !data.assets || !data.descriptions) {
-                console.warn("Steam response missing assets or descriptions");
+                console.warn("[STEAM] Empty response or private profile");
                 return [];
             }
 
-            // Создаем карту описаний для быстрого поиска
             const descriptionsMap = {};
             data.descriptions.forEach(d => {
                 descriptionsMap[`${d.classid}_${d.instanceid}`] = d;
             });
 
-            // Сопоставление assets и descriptions
             const items = data.assets.map(asset => {
                 const desc = descriptionsMap[`${asset.classid}_${asset.instanceid}`];
-                if (!desc) return null;
-
-                // CS2 предметы обычно marketable, но некоторые (медали и т.д.) нет.
-                // Нам нужны скины. У скинов есть market_hash_name.
-                // Убираем жесткую проверку marketale, так как иногда Steam чудит с флагами
-                if (!desc.market_hash_name) return null;
-
-                // Фильтруем базовые предметы, которые нельзя продать/передать, если у них нет цены?
-                // Обычно marketable=1 это гарантия. Но если пусто - попробуем вернуть все что похоже на скин.
-                // Лучше полагаться на marketable, но если пользователь говорит "пусто", может флаг подвел.
-                // Давайте вернем marketable || (tradable && type != "Base Grade Container")
-                // Для простоты пока вернем всё что имеет хеш-нейм и иконку.
+                if (!desc || !desc.market_hash_name) return null;
 
                 return {
                     name: desc.market_name,
@@ -72,16 +64,14 @@ module.exports = {
                 };
             }).filter(item => item !== null);
 
-            console.log(`Parsed ${items.length} items from inventory`);
+            console.log(`[STEAM] Found ${items.length} items`);
             return items;
         } catch (e) {
-            console.error("Steam Inventory Error:", e.message);
-            if (e.response && e.response.status === 429) {
-                throw new Error("Steam Rate Limit (429). Попробуйте позже.");
-            }
-            if (e.response && e.response.status === 403) {
-                throw new Error("Steam Inventory Private (403). Проверьте настройки приватности.");
-            }
+            const status = e.response ? e.response.status : 'Network Error';
+            console.error(`[STEAM] Inventory Error (${status}):`, e.message);
+
+            if (status === 429) throw new Error("Steam Rate Limit (429). Попробуйте через 5-10 минут.");
+            if (status === 403) throw new Error("Steam Profile Private (403). Откройте инвентарь в настройках.");
             throw new Error(`Steam Error: ${e.message}`);
         }
     },
@@ -89,20 +79,15 @@ module.exports = {
     // Получение цены
     getPrice: async (marketHashName) => {
         try {
-            const response = await axios.get(STEAM_PRICE_URL(marketHashName));
+            const response = await axios.get(STEAM_PRICE_URL(marketHashName), { headers: HEADERS });
             if (response.data && response.data.lowest_price) {
-                // Цена приходит в формате "123,45 pуб."
                 let priceStr = response.data.lowest_price;
-                // Убираем символы валюты и заменяем запятую на точку
                 let priceVal = parseFloat(priceStr.replace(/[^\d.,]/g, '').replace(',', '.'));
-                return {
-                    price: priceVal,
-                    text: priceStr
-                };
+                return { price: priceVal, text: priceStr };
             }
             return null;
         } catch (e) {
-            console.error(`Price fetch error for ${marketHashName}:`, e.message);
+            console.error("[STEAM] Price Error:", e.message);
             return null;
         }
     }
