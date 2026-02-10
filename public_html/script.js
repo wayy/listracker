@@ -110,8 +110,12 @@ async function loadInventory() {
         renderCategories();
         switchScreen('categories-screen');
     } catch (e) {
+        console.error("Inventory load error:", e);
         document.getElementById('loader').innerHTML = `
-            <p style="color:#ff6b6b">Ошибка загрузки данных:<br>${e.message}</p>
+            <p style="color:#ff6b6b; font-weight:bold;">Ошибка загрузки данных:</p>
+            <p style="font-size:14px; color:#eee; background:rgba(255,0,0,0.1); padding:10px; border-radius:5px;">${e.message}</p>
+            <br>
+            <p style="font-size:12px; color:#aaa;">Убедитесь, что инвентарь в Steam открыт (Public), и сервер запущен.</p>
             <br>
             <button onclick="location.reload()" class="action-btn">Повторить</button>
         `;
