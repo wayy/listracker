@@ -55,7 +55,7 @@ module.exports = {
         return new Promise((resolve, reject) => {
             db.all("SELECT market_hash_name as name, market_hash_name, category, type, image FROM user_items WHERE telegram_user_id = ?", [tgId], (err, rows) => {
                 if (err) reject(err);
-                else resolve(rows);
+                else resolve(rows || []);
             });
         });
     },
@@ -71,11 +71,16 @@ module.exports = {
                 // Вставляем новые
                 const stmt = db.prepare("INSERT INTO user_items (telegram_user_id, market_hash_name, category, type, image) VALUES (?, ?, ?, ?, ?)");
                 for (const item of items) {
-                    // Простая логика категории для БД: берем часть до " | "
-                    let category = (item.name || '').split(' | ')[0];
-                    if (category.includes('Sticker')) category = 'Stickers';
-                    if (category.includes('Case')) category = 'Cases';
-                    if (category.includes('Graffiti')) category = 'Graffiti';
+                    // Используем логику категорий как в примере пользователя
+                    let name = (item.name || '').toLowerCase();
+                    let category = '🛠 Прочее';
+
+                    if (name.includes('case') || name.includes('кейс') || name.includes('пакет') || name.includes('набор')) category = '📦 Кейсы';
+                    else if (name.includes('sticker') || name.includes('наклейка')) category = '🎯 Наклейки';
+                    else if (name.includes('agent') || name.includes('агент')) category = '👤 Агенты';
+                    else if (name.includes('music kit') || name.includes('музыка')) category = '🎵 Музыка';
+                    else if (name.includes('graffiti') || name.includes('граффити')) category = '🎨 Граффити';
+                    else if (item.name && item.name.includes('|')) category = '🔫 Оружие';
 
                     stmt.run(tgId, item.market_hash_name, category, item.type, item.image);
                 }
@@ -91,34 +96,19 @@ module.exports = {
     // Проверка наличия отслеживаемых предметов в новом инвентаре
     checkTrackedItemsAvailability: (tgId, currentItemNames) => {
         return new Promise((resolve, reject) => {
-            // Получаем все отслеживаемые предметы пользователя
             db.all("SELECT market_hash_name FROM tracking WHERE telegram_user_id = ?", [tgId], (err, rows) => {
-                if (err) {
-                    return reject(err);
-                }
+                if (err) return reject(err);
 
-                const trackedNames = new Set(rows.map(r => r.market_hash_name));
                 const currentNames = new Set(currentItemNames);
-                const toRemove = [];
-
-                for (const name of trackedNames) {
-                    if (!currentNames.has(name)) {
-                        toRemove.push(name);
-                    }
-                }
+                const toRemove = rows.filter(r => !currentNames.has(r.market_hash_name)).map(r => r.market_hash_name);
 
                 if (toRemove.length > 0) {
-                    // Удаляем отсутствующие предметы из отслеживания
-                    // Важно: node-sqlite3 не поддерживает массивы в IN коастомно, нужно формировать строку
                     const placeholders = toRemove.map(() => '?').join(',');
                     const sql = `DELETE FROM tracking WHERE telegram_user_id = ? AND market_hash_name IN (${placeholders})`;
-                    const params = [tgId, ...toRemove];
-
-                    db.run(sql, params, (err) => {
+                    db.run(sql, [tgId, ...toRemove], (err) => {
                         if (err) reject(err);
-                        else resolve(toRemove); // Возвращаем список удаленных
-                    }
-                    );
+                        else resolve(toRemove);
+                    });
                 } else {
                     resolve([]);
                 }
@@ -127,7 +117,6 @@ module.exports = {
     },
     addTracking: (tgId, hashName, price, currency) => {
         return new Promise((resolve, reject) => {
-            // Проверяем, не отслеживается ли уже этот предмет этим пользователем
             db.get("SELECT id FROM tracking WHERE telegram_user_id = ? AND market_hash_name = ?", [tgId, hashName], (err, row) => {
                 if (row) {
                     resolve({ status: 'already_tracked' });
