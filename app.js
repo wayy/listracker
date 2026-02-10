@@ -42,8 +42,9 @@ bot.on('text', async (ctx) => {
 
             // Сохраняем пользователя
             await db.saveUser(ctx.from.id, steamId, ctx.from.first_name);
+            console.log(`[BOT] Saved user: ${ctx.from.id} (${ctx.from.first_name}) with steam_id: ${steamId}`);
 
-            // Удаляем сообщение "Проверяю...", чтобы не засорять чат (опционально)
+            // Удаляем старое сообщение "Обработка...", чтобы не спамить
             try {
                 await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id);
             } catch (e) { }
@@ -73,27 +74,40 @@ app.get('/api/inventory', async (req, res) => {
     if (!tgId) return res.status(400).json({ error: "Missing tg_id" });
 
     try {
-        const user = await db.getUser(tgId);
-        if (!user) return res.status(404).json({ error: "User not found" });
+        const user = await db.getUser(Number(tgId));
+        if (!user) {
+            console.error(`[API] User not found for tg_id: ${tgId}`);
+            return res.status(404).json({ error: "User not found. Please send your Steam profile link to the bot again." });
+        }
 
-        const items = await steam.getInventory(user.steam_id);
+        let items = [];
+        let isCached = false;
 
-        // Синхронизация с БД
-        if (items.length > 0) {
-            // Сохраняем инвентарь (кеш)
-            await db.updateUserInventory(tgId, items);
+        try {
+            items = await steam.getInventory(user.steam_id);
+            // Если получили данные - обновляем кеш
+            if (items.length > 0) {
+                await db.updateUserInventory(tgId, items);
 
-            // Проверка на пропавшие предметы
-            const currentItemNames = items.map(i => i.market_hash_name);
-            const removedItems = await db.checkTrackedItemsAvailability(tgId, currentItemNames);
+                // Проверка на пропавшие предметы
+                const currentItemNames = items.map(i => i.market_hash_name);
+                const removedItems = await db.checkTrackedItemsAvailability(tgId, currentItemNames);
 
-            if (removedItems.length > 0) {
-                console.log(`Stopped tracking for items: ${removedItems.join(', ')}`);
-                // Опционально: можно уведомить пользователя, что предмет пропал и отслеживание остановлено
+                if (removedItems.length > 0) {
+                    console.log(`Stopped tracking for items: ${removedItems.join(', ')}`);
+                }
+            }
+        } catch (steamErr) {
+            console.warn("Steam Fetch Failed, trying cache:", steamErr.message);
+            items = await db.getCachedInventory(tgId);
+            isCached = true;
+            if (items.length === 0) {
+                // Если и в кеше пусто - тогда уже пробрасываем ошибку Steam
+                throw steamErr;
             }
         }
 
-        res.json({ items });
+        res.json({ items, cached: isCached });
     } catch (e) {
         console.error("Inventory Error:", e);
         res.status(500).json({ error: e.message });
