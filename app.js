@@ -43,7 +43,12 @@ bot.on('text', async (ctx) => {
             // Сохраняем пользователя
             await db.saveUser(ctx.from.id, steamId, ctx.from.first_name);
 
-            ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            // Удаляем сообщение "Проверяю...", чтобы не засорять чат (опционально)
+            try {
+                await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id);
+            } catch (e) { }
+
+            await ctx.reply(
                 "Профиль привязан! Теперь ты можешь открыть инвентарь.",
                 Markup.keyboard([
                     Markup.button.webApp("📦 Инвентарь CS2", WEBAPP_URL)
