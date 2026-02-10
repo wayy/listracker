@@ -125,7 +125,8 @@ async function loadInventory() {
             errorMsg = `
                 <div style="text-align:left;">
                 <b>Ошибка сети (Failed to fetch)</b><br>
-                По адресу: <code>${API_BASE_URL}</code><br><br>
+                По адресу: <code>${API_BASE_URL}</code><br>
+                Метод: <code>GET /api/inventory</code><br><br>
                 Возможные причины:<br>
                 1. Сервер не запущен на Bothost.<br>
                 2. Блокировка CORS (проверьте консоль).<br>
@@ -140,9 +141,27 @@ async function loadInventory() {
             <div style="font-size:14px; color:#eee; background:rgba(255,0,0,0.1); padding:10px; border-radius:5px; margin-bottom:10px;">${errorMsg}</div>
             <p style="font-size:11px; color:#888;">Debug: ${e.stack ? e.stack.split('\n')[0] : e.message}</p>
             <br>
-            <button onclick="location.reload()" class="action-btn">Повторить</button>
+            <div style="display:flex; gap:10px;">
+                <button onclick="location.reload()" class="action-btn">Повторить</button>
+                <button onclick="pingServer()" class="action-btn" style="background:#555">Проверить связь</button>
+            </div>
         `;
     }
+}
+
+async function pingServer() {
+    const btn = event.target;
+    btn.textContent = 'Проверка...';
+    try {
+        const start = Date.now();
+        const res = await fetch(API_BASE_URL + '/', { mode: 'cors', cache: 'no-cache' });
+        const text = await res.text();
+        const time = Date.now() - start;
+        alert(`Связь установлена!\nОтвет: ${text}\nВремя: ${time}ms`);
+    } catch (e) {
+        alert(`Ошибка связи при пинге:\n${e.message}\n\nЕсли в браузере ракета есть, а тут ошибка — значит Telegram блокирует запросы к Bothost (проблема SSL или CORS).`);
+    }
+    btn.textContent = 'Проверить связь';
 }
 
 // Группировка по крупным категориям (как на скриншоте пользователя)
