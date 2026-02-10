@@ -14,25 +14,31 @@ let userTgId = null;
 let trackedItems = new Set(); // Set of market_hash_names
 
 // Инициализация
+// Инициализация
 document.addEventListener('DOMContentLoaded', async () => {
-    // Получаем ID пользователя из initData
-    if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
-        userTgId = tg.initDataUnsafe.user.id;
-        document.getElementById('loader').innerHTML = '<div class="spinner"></div><p>Загрузка данных...</p><br><small>ID: ' + userTgId + '</small>';
-        await loadTrackedItems();
-        loadInventory();
-    } else {
-        // Fallback for testing without Telegram environment
-        const urlParams = new URLSearchParams(window.location.search);
-        const debugTgId = urlParams.get('tg_id');
-        if (debugTgId) {
-            userTgId = debugTgId;
-            document.getElementById('loader').innerHTML = '<div class="spinner"></div><p>Режим отладки...</p><br><small>ID: ' + userTgId + '</small>';
+    try {
+        // Получаем ID пользователя из initData
+        if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
+            userTgId = tg.initDataUnsafe.user.id;
+            document.getElementById('loader').innerHTML = '<div class="spinner"></div><p>Загрузка данных...</p><br><small>ID: ' + userTgId + '</small>';
             await loadTrackedItems();
             loadInventory();
         } else {
-            document.getElementById('loader').innerHTML = '<p style="color:red">Ошибка: Не удалось определить пользователя.<br>Запустите через Telegram.</p>';
+            // Fallback for testing without Telegram environment
+            const urlParams = new URLSearchParams(window.location.search);
+            const debugTgId = urlParams.get('tg_id');
+            if (debugTgId) {
+                userTgId = debugTgId;
+                document.getElementById('loader').innerHTML = '<div class="spinner"></div><p>Режим отладки...</p><br><small>ID: ' + userTgId + '</small>';
+                await loadTrackedItems();
+                loadInventory();
+            } else {
+                document.getElementById('loader').innerHTML = '<p style="color:red">Ошибка: Не удалось определить пользователя.<br>Запустите через Telegram.</p>';
+            }
         }
+    } catch (e) {
+        alert('Global Error: ' + e.message);
+        document.body.innerHTML = '<p style="color:red; padding: 20px;">CRITICAL ERROR: ' + e.message + '</p>';
     }
 });
 
