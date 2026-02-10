@@ -8,76 +8,58 @@ require('dotenv').config();
 
 // КОНФИГУРАЦИЯ
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const PORT = process.env.PORT || 3000;
 const WEBAPP_URL = process.env.WEBAPP_URL;
+const PORT = process.env.PORT || 3000; // Вернул порт 3000 по просьбе пользователя
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
-app.use(cors()); // Разрешаем запросы с GitHub Pages
+app.use(cors());
 app.use(express.json());
 
 // --- ЛОГИКА БОТА ---
 
 bot.start((ctx) => {
-    ctx.reply(
-        "Привет! Я помогу отслеживать цены на твои скины в CS2.\n\n" +
-        "Отправь мне ссылку на твой Steam-профиль.\n" +
-        "Пример: https://steamcommunity.com/id/gabene или https://steamcommunity.com/profiles/76561198000000000"
-    );
+    ctx.reply("👋 Привет! Я помогу тебе следить за ценами скинов CS2.\n\nПросто отправь мне ссылку на свой Steam профиль.");
 });
 
 bot.on('text', async (ctx) => {
-    const text = ctx.message.text.trim();
-
-    // Простая валидация ссылки
+    const text = ctx.message.text;
     if (text.includes('steamcommunity.com')) {
-        try {
-            const msg = await ctx.reply("Проверяю профиль...");
-            const steamId = await steam.resolveSteamID(text);
+        const msg = await ctx.reply("⏳ Обработка профиля...");
+        const steamId = await steam.resolveSteamID(text);
 
-            if (!steamId) {
-                return ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "Не удалось найти Steam ID. Убедитесь, что ссылка верна и профиль открыт.");
-            }
-
-            // Сохраняем пользователя
+        if (steamId) {
             await db.saveUser(ctx.from.id, steamId, ctx.from.first_name);
-            console.log(`[BOT] Saved user: ${ctx.from.id} (${ctx.from.first_name}) with steam_id: ${steamId}`);
+            console.log(`[BOT] User registered: ${ctx.from.id} -> ${steamId}`);
 
-            // Удаляем старое сообщение "Обработка...", чтобы не спамить
-            try {
-                await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id);
-            } catch (e) { }
+            try { await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id); } catch (e) { }
 
             await ctx.reply(
-                "Профиль привязан! Теперь ты можешь открыть инвентарь.",
+                "✅ Ссылка принята! Теперь ты можешь открыть свой инвентарь.",
                 Markup.keyboard([
                     Markup.button.webApp("📦 Инвентарь CS2", `${WEBAPP_URL}?tg_id=${ctx.from.id}`)
                 ]).resize()
             );
-
-        } catch (e) {
-            console.error(e);
-            ctx.reply("Произошла ошибка при обработке ссылки.");
+        } else {
+            await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Не удалось найти Steam ID. Убедитесь, что ссылка верна.");
         }
-    } else {
-        ctx.reply("Пожалуйста, отправь корректную ссылку на Steam-профиль.");
     }
 });
 
 // --- API ДЛЯ MINI APP ---
 
-// 1. Получение инвентаря (Mini App запрашивает у нас, мы у Steam)
 app.get('/api/inventory', async (req, res) => {
     const tgId = req.query.tg_id;
+    console.log(`[API] Inventory request for user: ${tgId}`);
 
     if (!tgId) return res.status(400).json({ error: "Missing tg_id" });
 
     try {
         const user = await db.getUser(Number(tgId));
         if (!user) {
-            console.error(`[API] User not found for tg_id: ${tgId}`);
-            return res.status(404).json({ error: "User not found. Please send your Steam profile link to the bot again." });
+            console.warn(`[API] User ${tgId} not found in DB`);
+            return res.status(404).json({ error: "User not found. Зарегистрируйтесь в боте заново." });
         }
 
         let items = [];
@@ -85,136 +67,82 @@ app.get('/api/inventory', async (req, res) => {
 
         try {
             items = await steam.getInventory(user.steam_id);
-            // Если получили данные - обновляем кеш
-            if (items.length > 0) {
+            if (items && items.length > 0) {
                 await db.updateUserInventory(tgId, items);
-
-                // Проверка на пропавшие предметы
-                const currentItemNames = items.map(i => i.market_hash_name);
-                const removedItems = await db.checkTrackedItemsAvailability(tgId, currentItemNames);
-
-                if (removedItems.length > 0) {
-                    console.log(`Stopped tracking for items: ${removedItems.join(', ')}`);
-                }
+                // Проверка на пропавшие отслеживаемые предметы
+                const currentNames = items.map(i => i.market_hash_name);
+                await db.checkTrackedItemsAvailability(tgId, currentNames);
             }
         } catch (steamErr) {
-            console.warn("Steam Fetch Failed, trying cache:", steamErr.message);
-            items = await db.getCachedInventory(tgId);
-            isCached = true;
-            if (items.length === 0) {
-                // Если и в кеше пусто - тогда уже пробрасываем ошибку Steam
+            console.warn(`[API] Steam Error for ${tgId}: ${steamErr.message}. Checking cache...`);
+            // Тут была ошибка "is not a function" - теперь мы уверены что она есть
+            if (typeof db.getCachedInventory === 'function') {
+                items = await db.getCachedInventory(tgId);
+                isCached = true;
+            } else {
+                console.error("[CRITICAL] db.getCachedInventory is still missing in memory!");
                 throw steamErr;
             }
+
+            if (!items || items.length === 0) throw steamErr;
         }
 
         res.json({ items, cached: isCached });
     } catch (e) {
-        console.error("Inventory Error:", e);
+        console.error("[API] Fatal Error:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
 
-// 2. Получение цены предмета
+// Прочие эндпоинты
 app.get('/api/price', async (req, res) => {
-    const name = req.query.name;
     try {
-        const priceData = await steam.getPrice(name);
-        if (!priceData) return res.status(404).json({ error: "Price not found" });
-        res.json(priceData);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+        const data = await steam.getPrice(req.query.name);
+        res.json(data || { error: "Not found" });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 3. Добавление в отслеживание
 app.post('/api/track', async (req, res) => {
     const { tg_id, name, price, currency } = req.body;
     try {
         const result = await db.addTracking(tg_id, name, price, currency);
         res.json(result);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 4. Удаление из отслеживания
 app.post('/api/untrack', async (req, res) => {
-    const { tg_id, name } = req.body;
     try {
-        await db.removeTracking(tg_id, name);
+        await db.removeTracking(req.body.tg_id, req.body.name);
         res.json({ status: 'success' });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 5. Получение списка отслеживаемых
 app.get('/api/tracked', async (req, res) => {
-    const tgId = req.query.tg_id;
-    if (!tgId) return res.status(400).json({ error: "Missing tg_id" });
-
     try {
-        const tracked = await db.getTrackedItemsForUser(tgId);
+        const tracked = await db.getTrackedItemsForUser(req.query.tg_id);
         res.json({ tracked });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- CRON JOB (Проверка цен каждый час) ---
-// Задача запускается в 0 минут каждого часа
+// Cron job
 cron.schedule('0 * * * *', async () => {
-    console.log("Running price check...");
-    try {
-        const tracks = await db.getAllTrackingItems();
-
-        for (const track of tracks) {
-            // Эмуляция задержки для избежания rate limit
-            await new Promise(r => setTimeout(r, 2000));
-
+    console.log("[CRON] Checking prices...");
+    const tracks = await db.getAllTrackingItems();
+    for (const track of tracks) {
+        const data = await steam.getPrice(track.market_hash_name);
+        if (data && data.price > track.last_price) {
+            const msg = `📈 *Цена выросла!*\n\n${track.market_hash_name}\nБыло: ${track.last_price} -> Стало: ${data.text}`;
             try {
-                const currentData = await steam.getPrice(track.market_hash_name);
-
-                if (currentData) {
-                    // Если цена выросла
-                    if (currentData.price > track.last_price) {
-                        const diff = (currentData.price - track.last_price).toFixed(2);
-                        const msg = `📈 Цена на <b>${track.market_hash_name}</b> выросла!\n` +
-                            `Было: ${track.last_price} руб.\n` +
-                            `Стало: ${currentData.text} (+${diff})`;
-
-                        try {
-                            await bot.telegram.sendMessage(track.telegram_user_id, msg, { parse_mode: 'HTML' });
-                        } catch (err) {
-                            console.error(`Failed to send message to ${track.telegram_user_id}:`, err.message);
-                        }
-                    }
-
-                    // Обновляем последнюю известную цену, если она отличается
-                    if (currentData.price !== track.last_price) {
-                        db.updateLastPrice(track.id, currentData.price);
-                    }
-                }
-            } catch (innerErr) {
-                console.error(`Error checking item ${track.market_hash_name}:`, innerErr);
-            }
+                await bot.telegram.sendMessage(track.telegram_user_id, msg, { parse_mode: 'Markdown' });
+                await db.updateLastPrice(track.id, data.price);
+            } catch (e) { }
         }
-    } catch (e) {
-        console.error("Cron Error:", e);
+        await new Promise(r => setTimeout(r, 2000));
     }
 });
 
-// Запуск
-bot.launch().then(() => {
-    console.log('Telegram bot started');
-}).catch(err => {
-    console.error("Bot launch error:", err);
-});
+bot.launch();
+app.listen(PORT, '0.0.0.0', () => console.log(`[SERVER] Started on port ${PORT}`));
 
-app.listen(PORT, () => {
-    console.log(`Backend API running on port ${PORT}`);
-});
-
-// Graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', () => { bot.stop('SIGINT'); process.exit(); });
+process.once('SIGTERM', () => { bot.stop('SIGTERM'); process.exit(); });
