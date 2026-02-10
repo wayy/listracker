@@ -109,13 +109,27 @@ async function loadInventory() {
         processCategories();
         renderCategories();
         switchScreen('categories-screen');
+
+        // Если данные из кеша - показываем уведомление
+        if (data.cached) {
+            const statusDiv = document.createElement('div');
+            statusDiv.style = "background: rgba(255, 152, 0, 0.2); color: #ff9800; padding: 10px; font-size: 12px; margin-bottom: 10px; border-radius: 8px; text-align: center;";
+            statusDiv.innerHTML = "⚠️ Steam временно недоступен (429).<br>Показаны данные из кеша.";
+            const container = document.getElementById('categories-list');
+            container.prepend(statusDiv);
+        }
     } catch (e) {
         console.error("Inventory load error:", e);
+        let errorMsg = e.message;
+        if (errorMsg === 'Failed to fetch') {
+            errorMsg = `Не удалось подключиться к серверу по адресу:<br><b>${API_BASE_URL}</b><br><br><small>Убедитесь, что сервер запущен и доступен по HTTPS.</small>`;
+        }
+
         document.getElementById('loader').innerHTML = `
             <p style="color:#ff6b6b; font-weight:bold;">Ошибка загрузки данных:</p>
-            <p style="font-size:14px; color:#eee; background:rgba(255,0,0,0.1); padding:10px; border-radius:5px;">${e.message}</p>
+            <p style="font-size:14px; color:#eee; background:rgba(255,0,0,0.1); padding:10px; border-radius:5px;">${errorMsg}</p>
             <br>
-            <p style="font-size:12px; color:#aaa;">Убедитесь, что инвентарь в Steam открыт (Public), и сервер запущен.</p>
+            <p style="font-size:12px; color:#aaa;">Если вы видите ошибку "is not a function", обязательно <b>перезапустите в консоли</b> файл <code>app.js</code>.</p>
             <br>
             <button onclick="location.reload()" class="action-btn">Повторить</button>
         `;
