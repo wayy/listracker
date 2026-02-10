@@ -14,11 +14,19 @@ const PORT = process.env.PORT || 3000; // Вернул порт 3000 по про
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
-app.use(cors());
 app.use(express.json());
 
-// Логирование всех запросов для отладки
+// Ручная настройка CORS (более надежно для некоторых хостингов)
 app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+
+    // Мгновенный ответ на предпроверочные запросы (Preflight)
+    if (req.method === "OPTIONS") {
+        return res.sendStatus(200);
+    }
+
     console.log(`[DEBUG] ${new Date().toISOString()} ${req.method} ${req.url}`);
     console.log(`[DEBUG] Origin: ${req.headers.origin}`);
     next();
