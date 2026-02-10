@@ -82,7 +82,7 @@ module.exports = {
             if (e.response && e.response.status === 403) {
                 throw new Error("Steam Inventory Private (403). Проверьте настройки приватности.");
             }
-            throw new Error("Failed to fetch inventory. Profile might be private or Steam is down.");
+            throw new Error(`Steam Error: ${e.message}`);
         }
     },
 
